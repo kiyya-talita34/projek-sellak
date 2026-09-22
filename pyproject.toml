@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yshorts-bot"
+version = "1.0.0"
+description = "AI-assisted YouTube Shorts automation queue"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.scripts]
+yshorts-bot = "yshorts_bot.cli:main"

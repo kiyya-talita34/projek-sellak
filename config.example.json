@@ -1,0 +1,43 @@
+{
+  "niche": "Fakta menarik dunia",
+  "total_videos": 10,
+  "segments_per_video": 2,
+  "segment_duration_seconds": 8,
+  "schedule": {
+    "mode": "interval",
+    "interval_hours": 3,
+    "start_time": "08:00",
+    "specific_times": ["08:00", "12:00", "18:00", "21:00"],
+    "timezone": "Asia/Jakarta"
+  },
+  "paths": {
+    "data_dir": "data",
+    "prompt_dir": "data/prompts",
+    "flow_download_dir": "data/flow_downloads",
+    "output_dir": "data/output",
+    "failed_dir": "data/failed",
+    "log_dir": "data/logs",
+    "db_path": "data/yshorts.sqlite3"
+  },
+  "flow": {
+    "provider": "manual",
+    "wait_timeout_minutes": 1440,
+    "poll_seconds": 10
+  },
+  "youtube": {
+    "privacy_status": "private",
+    "made_for_kids": false,
+    "category_id": "22"
+  },
+  "retry": {
+    "max_attempts": 3,
+    "base_delay_seconds": 60
+  },
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "video_bitrate": "8M",
+    "audio_bitrate": "192k"
+  }
+}
