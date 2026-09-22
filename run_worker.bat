@@ -1,9 +1,11 @@
 @echo off
+setlocal
 title YShorts Bot - Background Worker
+cd /d "%~dp0"
 echo ===================================================
-echo Menjalankan YShorts Bot Background Worker
-echo Memproses antrean video YouTube Shorts...
+echo  YShorts Bot Worker - memproses antrean video
 echo ===================================================
-set "PATH=C:\Program Files\Python311;C:\Program Files\Python311\Scripts;%PATH%"
-python -m yshorts_bot run
+set "PY=python"
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+"%PY%" -m yshorts_bot run
 pause

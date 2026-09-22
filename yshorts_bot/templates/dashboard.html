@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YShorts Bot Studio - Otomasi YouTube Shorts</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --muted: #94a3b8; }
+    body { background: var(--bg); color: #f8fafc; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+    .form-control, .form-select { background: #0b1220; color: #f8fafc; border-color: var(--border); }
+    .form-control:focus, .form-select:focus { background: #0b1220; color: #fff; border-color: #6366f1; box-shadow: none; }
+    .form-control::placeholder { color: #64748b; }
+    .stat-card { padding: .9rem; border-radius: 10px; text-align: center; background: rgba(255,255,255,.03); border: 1px solid var(--border); }
+    .stat-val { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+    .badge-status { font-size: .75rem; padding: .35rem .6rem; border-radius: 20px; white-space: nowrap; }
+    .st-queued { background: #3b82f6; } .st-planning { background: #8b5cf6; }
+    .st-waiting { background: #f59e0b; color: #000; } .st-merging { background: #eab308; color: #000; }
+    .st-metadata { background: #a855f7; } .st-scheduled { background: #06b6d4; color: #000; }
+    .st-uploading { background: #0ea5e9; } .st-done { background: #10b981; }
+    .st-failed { background: #ef4444; } .st-cancelled { background: #64748b; }
+    .preset-btn { font-size: .78rem; margin: 0 .35rem .35rem 0; border-radius: 20px; }
+    .terminal-box { background: #000; color: #38bdf8; font-family: Consolas, "Courier New", monospace; font-size: .76rem; height: 260px; overflow-y: auto; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+    .btn-action { padding: .2rem .5rem; font-size: .78rem; }
+    .text-muted, .form-text { color: var(--muted) !important; }
+    .pill { border-radius: 20px; padding: .3rem .7rem; font-size: .78rem; font-weight: 600; }
+    .pill-on { background: #064e3b; color: #6ee7b7; border: 1px solid #10b981; }
+    .pill-off { background: #450a0a; color: #fca5a5; border: 1px solid #ef4444; }
+    .pill-pause { background: #451a03; color: #fcd34d; border: 1px solid #f59e0b; }
+    .steps { display: flex; gap: 4px; flex-wrap: wrap; }
+    .step { flex: 1 1 auto; min-width: 72px; text-align: center; font-size: .68rem; padding: .3rem .2rem; border-radius: 6px; background: #0b1220; color: var(--muted); border: 1px solid var(--border); }
+    .step.done { background: #064e3b; color: #6ee7b7; border-color: #10b981; }
+    .step.active { background: #1e3a8a; color: #bfdbfe; border-color: #3b82f6; }
+    .step.failed { background: #450a0a; color: #fca5a5; border-color: #ef4444; }
+    .prompt-text { white-space: pre-wrap; font-size: .82rem; }
+    .table-dark { --bs-table-bg: transparent; }
+    .toast-container { z-index: 2000; }
+    .nav-tabs .nav-link { color: var(--muted); } .nav-tabs .nav-link.active { background: var(--card); color: #fff; border-color: var(--border) var(--border) var(--card); }
+    code { color: #fbbf24; }
+  </style>
+</head>
+<body class="p-3 p-md-4">
+<div class="container-fluid">
+
+  <!-- Header -->
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4 pb-2 border-bottom border-secondary">
+    <div>
+      <h2 class="fw-bold mb-0 text-white"><i class="bi bi-youtube text-danger me-2"></i>YShorts Bot Studio <small class="text-muted fs-6" id="appVersion"></small></h2>
+      <p class="text-muted small mb-0">Niche &rarr; AI ide &amp; prompt &rarr; Google Flow &rarr; FFmpeg 9:16 &rarr; YouTube Shorts terjadwal</p>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <span class="pill pill-off" id="workerPill"><i class="bi bi-cpu me-1"></i>Worker: memeriksa...</span>
+      <span class="badge bg-secondary" id="providerBadge" title="Provider aktif"></span>
+      <button class="btn btn-outline-warning btn-sm" id="pauseBtn" onclick="togglePause()"><i class="bi bi-pause-fill me-1"></i>Jeda</button>
+      <button class="btn btn-outline-info btn-sm" onclick="refreshAll()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      <a href="/docs" target="_blank" class="btn btn-outline-light btn-sm"><i class="bi bi-code-slash me-1"></i>API</a>
+    </div>
+  </div>
+
+  <div class="alert alert-warning py-2 small d-none" id="workerAlert"></div>
+
+  <!-- Stats -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Total Video</div><div class="stat-val text-white" id="stat-total">0</div></div></div>
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Antrean</div><div class="stat-val text-primary" id="stat-queued">0</div></div></div>
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Diproses / Flow</div><div class="stat-val text-warning" id="stat-processing">0</div></div></div>
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Menunggu Jadwal</div><div class="stat-val text-info" id="stat-scheduled">0</div></div></div>
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Terupload</div><div class="stat-val text-success" id="stat-done">0</div></div></div>
+    <div class="col-6 col-md-2"><div class="stat-card"><div class="text-muted small">Gagal / Batal</div><div class="stat-val text-danger" id="stat-failed">0</div></div></div>
+  </div>
+
+  <div class="row g-4">
+    <!-- Kolom kiri -->
+    <div class="col-lg-4">
+      <ul class="nav nav-tabs mb-3" role="tablist">
+        <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabNew" type="button"><i class="bi bi-plus-circle me-1"></i>Buat Video</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabSettings" type="button" onclick="loadConfigForm()"><i class="bi bi-gear me-1"></i>Pengaturan</button></li>
+      </ul>
+      <div class="tab-content">
+        <!-- Tab: buat video -->
+        <div class="tab-pane fade show active" id="tabNew">
+          <div class="card p-3 shadow-sm">
+            <div class="mb-3">
+              <label class="form-label small fw-semibold"><i class="bi bi-magic me-1 text-warning"></i>Topik cepat:</label>
+              <div>
+                <button class="btn btn-sm btn-outline-info preset-btn" onclick="setNiche('Fakta unik dunia')">🌍 Fakta Unik</button>
+                <button class="btn btn-sm btn-outline-danger preset-btn" onclick="setNiche('Cerita horor misteri')">👻 Horor</button>
+                <button class="btn btn-sm btn-outline-success preset-btn" onclick="setNiche('Fakta menarik tentang hewan')">🐾 Hewan</button>
+                <button class="btn btn-sm btn-outline-warning preset-btn" onclick="setNiche('Motivasi & pola pikir sukses')">💡 Motivasi</button>
+                <button class="btn btn-sm btn-outline-primary preset-btn" onclick="setNiche('Misteri sejarah kuno')">🏛️ Sejarah</button>
+                <button class="btn btn-sm btn-outline-light preset-btn" onclick="setNiche('Perkembangan teknologi AI masa depan')">🤖 Teknologi</button>
+              </div>
+            </div>
+            <form id="enqueueForm" onsubmit="handleEnqueue(event)">
+              <div class="mb-3">
+                <label class="form-label small fw-semibold">Niche / topik utama</label>
+                <input type="text" id="inputNiche" class="form-control form-control-sm" placeholder="Contoh: Fakta mengejutkan laut dalam" required maxlength="200">
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-5">
+                  <label class="form-label small fw-semibold">Jumlah video</label>
+                  <input type="number" id="inputCount" class="form-control form-control-sm" value="1" min="1" max="100" required>
+                </div>
+                <div class="col-7">
+                  <label class="form-label small fw-semibold">Mode jadwal</label>
+                  <select id="inputMode" class="form-select form-select-sm" onchange="toggleScheduleMode()">
+                    <option value="interval" selected>Interval tetap</option>
+                    <option value="specific_times">Jam tertentu</option>
+                  </select>
+                </div>
+              </div>
+              <div id="intervalFields">
+                <div class="row g-2 mb-3">
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Interval upload</label>
+                    <select id="inputInterval" class="form-select form-select-sm">
+                      <option value="1">Setiap 1 jam</option>
+                      <option value="3" selected>Setiap 3 jam</option>
+                      <option value="6">Setiap 6 jam</option>
+                      <option value="12">Setiap 12 jam</option>
+                      <option value="24">1 video / hari</option>
+                    </select>
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Jam mulai</label>
+                    <input type="time" id="inputStartTime" class="form-control form-control-sm" value="08:00">
+                    <div class="form-text">Kosongkan = mulai sekarang</div>
+                  </div>
+                </div>
+              </div>
+              <div id="specificFields" class="d-none mb-3">
+                <label class="form-label small fw-semibold">Jam upload (pisahkan dengan koma)</label>
+                <input type="text" id="inputTimes" class="form-control form-control-sm" value="08:00, 12:00, 18:00, 21:00">
+              </div>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="previewSchedule()"><i class="bi bi-calendar-week me-1"></i>Preview</button>
+                <button type="submit" class="btn btn-primary btn-sm flex-grow-1 fw-semibold"><i class="bi bi-send-fill me-1"></i>Tambah ke Antrean</button>
+              </div>
+              <div id="schedulePreview" class="small text-muted mt-2"></div>
+            </form>
+            <div class="mt-3 pt-3 border-top border-secondary">
+              <h6 class="small fw-bold text-muted mb-2"><i class="bi bi-info-circle me-1"></i>Alur otomatis</h6>
+              <ol class="small text-muted ps-3 mb-0">
+                <li>AI membuat ide + prompt segmen yang saling bersambung.</li>
+                <li>Video segmen dari Google Flow (<span id="flowModeHint">manual: salin prompt, unggah hasil di detail job</span>).</li>
+                <li>FFmpeg menggabungkan segmen menjadi Shorts 9:16 (&ge;16 detik, audio dijamin ada).</li>
+                <li>AI membuat judul/deskripsi/hashtag, lalu upload ke YouTube sesuai jadwal.</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: pengaturan -->
+        <div class="tab-pane fade" id="tabSettings">
+          <div class="card p-3 shadow-sm">
+            <form onsubmit="saveConfig(event)">
+              <h6 class="fw-bold mb-3"><i class="bi bi-sliders me-1 text-info"></i>Konfigurasi (<code>config.json</code>)</h6>
+              <div class="row g-2 mb-2">
+                <div class="col-8"><label class="form-label small">Niche default</label><input id="cfgNiche" class="form-control form-control-sm"></div>
+                <div class="col-4"><label class="form-label small">Total video</label><input id="cfgTotal" type="number" min="1" class="form-control form-control-sm"></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Segmen / video</label><input id="cfgSegments" type="number" min="1" max="6" class="form-control form-control-sm"></div>
+                <div class="col-6"><label class="form-label small">Durasi segmen (detik)</label><input id="cfgSegDur" type="number" min="1" class="form-control form-control-sm"></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Mode jadwal</label>
+                  <select id="cfgMode" class="form-select form-select-sm"><option value="interval">Interval</option><option value="specific_times">Jam tertentu</option></select></div>
+                <div class="col-6"><label class="form-label small">Interval (jam)</label><input id="cfgInterval" type="number" step="0.5" min="0.5" class="form-control form-control-sm"></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Jam mulai</label><input id="cfgStart" class="form-control form-control-sm" placeholder="08:00 / now"></div>
+                <div class="col-6"><label class="form-label small">Timezone</label><input id="cfgTz" class="form-control form-control-sm" placeholder="Asia/Jakarta"></div>
+              </div>
+              <div class="mb-2"><label class="form-label small">Jam tertentu (koma)</label><input id="cfgTimes" class="form-control form-control-sm"></div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Sumber video (Flow)</label>
+                  <select id="cfgFlow" class="form-select form-select-sm">
+                    <option value="manual">manual (aman, ToS)</option>
+                    <option value="browser">browser (eksperimental)</option>
+                    <option value="veo_api">veo_api (resmi, berbayar)</option>
+                  </select></div>
+                <div class="col-6"><label class="form-label small">Privasi YouTube</label>
+                  <select id="cfgPrivacy" class="form-select form-select-sm"><option value="private">private</option><option value="unlisted">unlisted</option><option value="public">public</option></select></div>
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-6"><label class="form-label small">Fit video 9:16</label>
+                  <select id="cfgFit" class="form-select form-select-sm"><option value="crop">crop (isi penuh)</option><option value="blur">blur (latar blur)</option><option value="pad">pad (bar hitam)</option></select></div>
+                <div class="col-6"><label class="form-label small">Maks. retry</label><input id="cfgRetry" type="number" min="1" class="form-control form-control-sm"></div>
+              </div>
+              <button class="btn btn-success btn-sm w-100 fw-semibold"><i class="bi bi-save me-1"></i>Simpan ke config.json</button>
+              <div class="form-text mt-2">Worker memuat ulang otomatis. Kredensial (.env) tidak diubah dari sini. Isi <code>niche</code> + <code>total video</code> lalu klik <em>Antrekan dari config</em>.</div>
+              <button type="button" class="btn btn-outline-primary btn-sm w-100 mt-2" onclick="enqueueFromConfig()"><i class="bi bi-collection-play me-1"></i>Antrekan dari config</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kolom kanan -->
+    <div class="col-lg-8">
+      <div class="card p-3 shadow-sm mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h5 class="fw-bold text-white mb-0"><i class="bi bi-collection-play me-2 text-info"></i>Antrean Video</h5>
+          <span class="badge bg-secondary" id="jobCountBadge">0 job</span>
+        </div>
+        <div class="table-responsive" style="max-height: 520px;">
+          <table class="table table-dark table-hover table-sm align-middle mb-0">
+            <thead class="text-white">
+              <tr><th style="width:50px">ID</th><th>Niche &amp; ide</th><th>Status</th><th>Segmen</th><th>Jadwal upload</th><th>Hasil</th><th class="text-end">Aksi</th></tr>
+            </thead>
+            <tbody id="jobsTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Memuat antrean...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card p-3 shadow-sm">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span class="small fw-bold text-white"><i class="bi bi-terminal me-2 text-warning"></i>Log</span>
+          <div class="d-flex gap-2 align-items-center">
+            <select id="logSource" class="form-select form-select-sm" style="width:auto" onchange="fetchLogs()">
+              <option value="worker">worker.log</option><option value="dashboard">dashboard.log</option>
+            </select>
+            <button class="btn btn-sm btn-outline-secondary py-0" onclick="fetchLogs()"><i class="bi bi-arrow-repeat"></i></button>
+          </div>
+        </div>
+        <div class="terminal-box" id="logBox">Memuat log...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal detail job -->
+<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title fw-bold" id="modalJobTitle">Detail Job</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="modalJobBody"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  let cachedJobs = [];
+  let currentStatus = null;
+  let openJobId = null;
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('id-ID', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'}) : '-';
+
+  function toast(message, type = 'info') {
+    const colors = { info: 'bg-primary', success: 'bg-success', warning: 'bg-warning text-dark', danger: 'bg-danger' };
+    const el = document.createElement('div');
+    el.className = `toast align-items-center text-white ${colors[type] || colors.info} border-0`;
+    el.innerHTML = `<div class="d-flex"><div class="toast-body">${esc(message)}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
+    document.getElementById('toastContainer').appendChild(el);
+    const t = new bootstrap.Toast(el, { delay: 4500 }); t.show();
+    el.addEventListener('hidden.bs.toast', () => el.remove());
+  }
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, options);
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) {
+      const detail = data && data.detail ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return data;
+  }
+
+  function statusInfo(status) {
+    if (status && status.startsWith('waiting_flow_segment_')) {
+      const n = status.split('_').pop();
+      return { label: `🎬 Menunggu Flow segmen ${n}`, cls: 'st-waiting' };
+    }
+    const map = {
+      queued: ['⏳ Antrean', 'st-queued'], planning: ['🧠 AI menyusun ide', 'st-planning'],
+      merging: ['⚙️ FFmpeg merge', 'st-merging'], metadata: ['📝 Metadata YouTube', 'st-metadata'],
+      scheduled: ['⏰ Menunggu jadwal', 'st-scheduled'], uploading: ['🚀 Upload YouTube', 'st-uploading'],
+      done: ['✅ Selesai', 'st-done'], failed: ['❌ Gagal', 'st-failed'], cancelled: ['⛔ Dibatalkan', 'st-cancelled']
+    };
+    const [label, cls] = map[status] || [status, 'st-cancelled'];
+    return { label, cls };
+  }
+  const badge = (status) => { const i = statusInfo(status); return `<span class="badge badge-status ${i.cls}">${esc(i.label)}</span>`; };
+
+  function stepsHtml(job) {
+    const total = (job.plan && job.plan.segments ? job.plan.segments.length : (currentStatus?.config?.segments_per_video || 2));
+    const steps = [['queued','Antrean'], ['planning','Ide & prompt']];
+    for (let i = 1; i <= total; i++) steps.push([`waiting_flow_segment_${i}`, `Flow seg ${i}`]);
+    steps.push(['merging','FFmpeg'], ['metadata','Metadata'], ['scheduled','Jadwal'], ['uploading','Upload'], ['done','Selesai']);
+    const failedFrom = job.failed_from_status;
+    const current = (job.status === 'failed' || job.status === 'cancelled') ? failedFrom : job.status;
+    let idx = steps.findIndex(s => s[0] === current); if (idx < 0) idx = 0;
+    return `<div class="steps">${steps.map((s, i) => {
+      let cls = i < idx ? 'done' : (i === idx ? ((job.status === 'failed' || job.status === 'cancelled') ? 'failed' : 'active') : '');
+      if (job.status === 'done') cls = 'done';
+      return `<div class="step ${cls}">${esc(s[1])}</div>`;
+    }).join('')}</div>`;
+  }
+
+  function setNiche(n) { document.getElementById('inputNiche').value = n; }
+  function toggleScheduleMode() {
+    const mode = document.getElementById('inputMode').value;
+    document.getElementById('intervalFields').classList.toggle('d-none', mode !== 'interval');
+    document.getElementById('specificFields').classList.toggle('d-none', mode !== 'specific_times');
+  }
+  function scheduleBody(withNiche) {
+    const mode = document.getElementById('inputMode').value;
+    const body = {
+      count: parseInt(document.getElementById('inputCount').value) || 1,
+      mode,
+      interval_hours: parseFloat(document.getElementById('inputInterval').value) || 3,
+      start_time: document.getElementById('inputStartTime').value || 'now',
+      specific_times: mode === 'specific_times' ? document.getElementById('inputTimes').value.split(',').map(s => s.trim()).filter(Boolean) : []
+    };
+    if (withNiche) body.niche = document.getElementById('inputNiche').value.trim();
+    return body;
+  }
+  async function previewSchedule() {
+    try {
+      const data = await api('/api/schedule/preview', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(scheduleBody(false)) });
+      const shown = data.times.slice(0, 6).map(fmtTime).join(' • ');
+      document.getElementById('schedulePreview').innerHTML = `<i class="bi bi-clock me-1"></i>Upload: ${esc(shown)}${data.times.length > 6 ? ` … (+${data.times.length - 6})` : ''} <span class="text-secondary">(waktu lokal browser)</span>`;
+    } catch (e) { toast('Preview gagal: ' + e.message, 'danger'); }
+  }
+  async function handleEnqueue(e) {
+    e.preventDefault();
+    const body = scheduleBody(true);
+    if (!body.niche) { toast('Niche tidak boleh kosong', 'warning'); return; }
+    try {
+      const data = await api('/api/enqueue', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+      toast(`${data.count} video ditambahkan ke antrean (job #${data.job_ids.join(', #')})`, 'success');
+      document.getElementById('inputNiche').value = '';
+      document.getElementById('schedulePreview').innerHTML = '';
+      refreshAll();
+    } catch (err) { toast('Gagal menambah antrean: ' + err.message, 'danger'); }
+  }
+  async function enqueueFromConfig() {
+    try {
+      const cfg = await api('/api/config');
+      const body = { niche: cfg.niche, count: cfg.total_videos, mode: cfg.schedule.mode, interval_hours: cfg.schedule.interval_hours, start_time: cfg.schedule.start_time, specific_times: cfg.schedule.specific_times };
+      if (!confirm(`Antrekan ${body.count} video untuk niche "${body.niche}"?`)) return;
+      const data = await api('/api/enqueue', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+      toast(`${data.count} video ditambahkan dari config.json`, 'success'); refreshAll();
+    } catch (err) { toast('Gagal: ' + err.message, 'danger'); }
+  }
+
+  // ---------------- pengaturan
+  async function loadConfigForm() {
+    try {
+      const c = await api('/api/config');
+      document.getElementById('cfgNiche').value = c.niche; document.getElementById('cfgTotal').value = c.total_videos;
+      document.getElementById('cfgSegments').value = c.segments_per_video; document.getElementById('cfgSegDur').value = c.segment_duration_seconds;
+      document.getElementById('cfgMode').value = c.schedule.mode; document.getElementById('cfgInterval').value = c.schedule.interval_hours;
+      document.getElementById('cfgStart').value = c.schedule.start_time; document.getElementById('cfgTz').value = c.schedule.timezone;
+      document.getElementById('cfgTimes').value = (c.schedule.specific_times || []).join(', ');
+      document.getElementById('cfgFlow').value = c.flow.provider === 'playwright' ? 'browser' : c.flow.provider;
+      document.getElementById('cfgPrivacy').value = c.youtube.privacy_status; document.getElementById('cfgFit').value = c.video.fit_mode;
+      document.getElementById('cfgRetry').value = c.retry.max_attempts;
+    } catch (e) { toast('Gagal memuat config: ' + e.message, 'danger'); }
+  }
+  async function saveConfig(e) {
+    e.preventDefault();
+    const update = {
+      niche: document.getElementById('cfgNiche').value, total_videos: parseInt(document.getElementById('cfgTotal').value),
+      segments_per_video: parseInt(document.getElementById('cfgSegments').value), segment_duration_seconds: parseInt(document.getElementById('cfgSegDur').value),
+      schedule: { mode: document.getElementById('cfgMode').value, interval_hours: parseFloat(document.getElementById('cfgInterval').value), start_time: document.getElementById('cfgStart').value,
+                  timezone: document.getElementById('cfgTz').value, specific_times: document.getElementById('cfgTimes').value.split(',').map(s => s.trim()).filter(Boolean) },
+      flow: { provider: document.getElementById('cfgFlow').value },
+      youtube: { privacy_status: document.getElementById('cfgPrivacy').value },
+      video: { fit_mode: document.getElementById('cfgFit').value },
+      retry: { max_attempts: parseInt(document.getElementById('cfgRetry').value) }
+    };
+    try {
+      await api('/api/config', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(update) });
+      toast('config.json tersimpan. Worker memuat ulang otomatis.', 'success'); fetchStatus();
+    } catch (err) { toast('Config tidak valid: ' + err.message, 'danger'); }
+  }
+
+  // ---------------- status & data
+  async function fetchStatus() {
+    try {
+      const s = await api('/api/status'); currentStatus = s;
+      document.getElementById('appVersion').innerText = 'v' + s.version;
+      const pill = document.getElementById('workerPill'); const w = s.worker;
+      if (w.online && w.paused) { pill.className = 'pill pill-pause'; pill.innerHTML = '<i class="bi bi-pause-circle me-1"></i>Worker: dijeda'; }
+      else if (w.online) { pill.className = 'pill pill-on'; pill.innerHTML = `<i class="bi bi-cpu me-1"></i>Worker: online${w.current_job ? ' • job #' + esc(w.current_job) : ''}`; }
+      else { pill.className = 'pill pill-off'; pill.innerHTML = '<i class="bi bi-cpu me-1"></i>Worker: offline'; }
+      const pb = document.getElementById('pauseBtn');
+      pb.innerHTML = w.paused ? '<i class="bi bi-play-fill me-1"></i>Lanjutkan' : '<i class="bi bi-pause-fill me-1"></i>Jeda';
+      pb.className = w.paused ? 'btn btn-outline-success btn-sm' : 'btn btn-outline-warning btn-sm';
+      const flow = w.flow_provider || s.config.flow_provider, ai = w.ai_provider || s.config.ai_provider;
+      const upload = w.upload_mode ? (w.upload_mode === 'mock' ? 'upload: SIMULASI' : 'upload: YouTube') : (s.config.mock_upload ? 'upload: SIMULASI' : 'upload: YouTube');
+      document.getElementById('providerBadge').innerText = `AI: ${ai} • Flow: ${flow} • ${upload} • ${s.config.privacy_status}`;
+      const hints = { manual: 'manual: salin prompt, unggah hasil MP4 di detail job', browser: 'otomasi browser eksperimental + fallback manual', playwright: 'otomasi browser eksperimental + fallback manual', veo_api: 'Veo API resmi (berbayar) otomatis' };
+      document.getElementById('flowModeHint').innerText = hints[flow] || flow;
+      const alert = document.getElementById('workerAlert'); const warns = [];
+      if (!w.online) warns.push('Worker belum berjalan: jalankan <code>python -m yshorts_bot run</code> (atau start.bat) supaya antrean diproses.');
+      if (!s.ffmpeg.available) warns.push('FFmpeg tidak ditemukan: install FFmpeg atau <code>pip install imageio-ffmpeg</code>.');
+      if (ai === 'mock') warns.push('AI_PROVIDER=mock (prompt contoh). Isi GEMINI_API_KEY / OPENAI_API_KEY di .env untuk ide & prompt asli.');
+      alert.innerHTML = warns.map(x => `<div><i class="bi bi-exclamation-triangle me-1"></i>${x}</div>`).join('');
+      alert.classList.toggle('d-none', warns.length === 0);
+    } catch (e) { console.error(e); }
+  }
+  async function togglePause() {
+    try {
+      const paused = currentStatus && currentStatus.worker.paused;
+      await api(paused ? '/api/worker/resume' : '/api/worker/pause', { method: 'POST' });
+      toast(paused ? 'Worker dilanjutkan' : 'Worker dijeda (job tidak diproses sampai dilanjutkan)', 'info'); fetchStatus();
+    } catch (e) { toast(e.message, 'danger'); }
+  }
+
+  async function fetchData() {
+    try {
+      const [jobs, stats] = await Promise.all([api('/api/jobs'), api('/api/stats')]);
+      cachedJobs = jobs;
+      document.getElementById('stat-total').innerText = stats.total || 0;
+      document.getElementById('stat-queued').innerText = stats.queued || 0;
+      document.getElementById('stat-processing').innerText = stats.processing || 0;
+      document.getElementById('stat-scheduled').innerText = stats.scheduled || 0;
+      document.getElementById('stat-done').innerText = stats.done || 0;
+      document.getElementById('stat-failed').innerText = stats.failed_or_cancelled || 0;
+      document.getElementById('jobCountBadge').innerText = `${jobs.length} job`;
+      const tbody = document.getElementById('jobsTableBody');
+      if (!jobs.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada video di antrean. Buat video pertama di panel kiri.</td></tr>'; return; }
+      tbody.innerHTML = jobs.map(j => {
+        const seg = (j.segments_ready || []).map((ok, i) => `<span class="badge ${ok ? 'bg-success' : 'bg-secondary'}" title="Segmen ${i + 1}">${i + 1}</span>`).join(' ');
+        let result = '<span class="text-muted small">-</span>';
+        if (j.youtube_video_id && !j.youtube_video_id.startsWith('demo_')) {
+          result = `<a href="https://youtube.com/shorts/${encodeURIComponent(j.youtube_video_id)}" target="_blank" class="btn btn-danger btn-action fw-bold"><i class="bi bi-youtube me-1"></i>Shorts</a>`;
+        } else if (j.output_exists) {
+          result = `<div class="btn-group btn-group-sm"><button class="btn btn-success btn-action" onclick="openJobDetail(${j.id})"><i class="bi bi-play-circle"></i></button><a href="/api/jobs/${j.id}/video" download="short_job_${j.id}.mp4" class="btn btn-outline-light btn-action" title="Unduh MP4"><i class="bi bi-download"></i></a></div>${j.youtube_video_id ? '<div><span class="badge bg-secondary mt-1" style="font-size:.62rem">upload simulasi</span></div>' : ''}`;
+        }
+        const waiting = j.status.startsWith('waiting_flow');
+        const canSim = waiting || j.status === 'queued' || j.status === 'planning';
+        return `<tr>
+          <td><strong>#${j.id}</strong></td>
+          <td><div class="fw-semibold">${esc(j.niche)}</div>${j.idea ? `<small class="text-info">${esc(j.idea)}</small>` : ''}${j.last_error && !j.is_terminal ? `<div class="small text-warning" title="${esc(j.last_error)}"><i class="bi bi-exclamation-circle"></i> retry ${j.attempts}/${j.max_attempts}</div>` : ''}</td>
+          <td>${badge(j.status)}</td>
+          <td class="text-nowrap">${seg}</td>
+          <td><small class="text-muted">${esc(fmtTime(j.scheduled_upload_at))}</small></td>
+          <td>${result}</td>
+          <td class="text-end text-nowrap">
+            ${waiting ? `<button class="btn btn-warning btn-action fw-bold me-1" onclick="openJobDetail(${j.id})" title="Unggah video Google Flow"><i class="bi bi-upload"></i></button>` : ''}
+            <button class="btn btn-outline-primary btn-action" onclick="openJobDetail(${j.id})"><i class="bi bi-eye"></i></button>
+            ${(j.status === 'failed' || j.status === 'cancelled') ? `<button class="btn btn-outline-warning btn-action ms-1" onclick="retryJob(${j.id})" title="Ulangi dari tahap gagal"><i class="bi bi-arrow-clockwise"></i></button>` : ''}
+            ${!j.is_terminal ? `<button class="btn btn-outline-danger btn-action ms-1" onclick="cancelJob(${j.id})" title="Batalkan"><i class="bi bi-x-circle"></i></button>` : ''}
+            ${j.is_terminal ? `<button class="btn btn-outline-secondary btn-action ms-1" onclick="deleteJob(${j.id})" title="Hapus"><i class="bi bi-trash"></i></button>` : ''}
+          </td></tr>`;
+      }).join('');
+      if (openJobId !== null) renderJobDetail(openJobId, false);
+    } catch (e) { console.error(e); }
+  }
+
+  // ---------------- detail job
+  function openJobDetail(jobId) { openJobId = jobId; renderJobDetail(jobId, true); }
+  function renderJobDetail(jobId, show) {
+    const job = cachedJobs.find(x => x.id === jobId); if (!job) return;
+    document.getElementById('modalJobTitle').innerText = `Job #${job.id} • ${job.niche}`;
+    const waiting = job.status.startsWith('waiting_flow');
+    const canSim = waiting || job.status === 'queued' || job.status === 'planning';
+    let body = `<div class="mb-3">${stepsHtml(job)}</div>
+      <div class="d-flex justify-content-between align-items-center mb-2"><span class="text-muted small">Status</span>${badge(job.status)}</div>
+      <div class="small text-muted mb-2">Dibuat ${esc(fmtTime(job.created_at))} • Jadwal upload ${esc(fmtTime(job.scheduled_upload_at))} • Percobaan ${job.attempts}/${job.max_attempts}</div>
+      ${job.last_error ? `<div class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>${esc(job.last_error)}</div>` : ''}
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        ${canSim ? `<button class="btn btn-sm btn-warning fw-bold" onclick="simulateJob(${job.id})"><i class="bi bi-lightning-fill me-1"></i>Tes demo (klip uji FFmpeg)</button>` : ''}
+        ${(job.status === 'failed' || job.status === 'cancelled') ? `<button class="btn btn-sm btn-outline-warning" onclick="retryJob(${job.id})"><i class="bi bi-arrow-clockwise me-1"></i>Ulangi dari tahap gagal</button>` : ''}
+        ${!job.is_terminal ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelJob(${job.id})"><i class="bi bi-x-circle me-1"></i>Batalkan</button>` : ''}
+        ${job.is_terminal ? `<button class="btn btn-sm btn-outline-secondary" onclick="deleteJob(${job.id})"><i class="bi bi-trash me-1"></i>Hapus job & file</button>` : ''}
+      </div>`;
+    if (job.output_exists) {
+      body += `<div class="card p-3 bg-black border-success mb-3 text-center">
+        <h6 class="fw-bold text-success mb-2"><i class="bi bi-play-btn-fill me-1"></i>Video Shorts (9:16)</h6>
+        <div class="d-flex justify-content-center mb-2"><video controls width="220" style="max-height:380px;border-radius:8px;background:#000" src="/api/jobs/${job.id}/video?v=${encodeURIComponent(job.updated_at)}"></video></div>
+        <div class="d-flex justify-content-center gap-2 flex-wrap">
+          <a href="/api/jobs/${job.id}/video" download="short_job_${job.id}.mp4" class="btn btn-sm btn-success fw-bold"><i class="bi bi-download me-1"></i>Unduh MP4</a>
+          ${job.youtube_video_id && !job.youtube_video_id.startsWith('demo_') ? `<a href="https://youtube.com/shorts/${encodeURIComponent(job.youtube_video_id)}" target="_blank" class="btn btn-sm btn-danger fw-bold"><i class="bi bi-youtube me-1"></i>Buka di YouTube</a>` : (job.youtube_video_id ? '<span class="badge bg-secondary align-self-center py-2">Upload simulasi (YOUTUBE_MOCK_UPLOAD)</span>' : '')}
+        </div></div>`;
+    }
+    if (job.plan && job.plan.segments && job.plan.segments.length) {
+      body += `<div class="small text-muted mb-2"><strong class="text-white">Ide:</strong> ${esc(job.plan.idea)} &nbsp;|&nbsp; <strong class="text-white">Hook:</strong> ${esc(job.plan.hook)} &nbsp;|&nbsp; <strong class="text-white">Style:</strong> ${esc(job.plan.style)}</div>
+        <h6 class="fw-bold text-warning mb-2"><i class="bi bi-stars me-1"></i>Prompt Google Flow (segmen bersambung)</h6>`;
+      job.plan.segments.forEach((seg, i) => {
+        const ready = job.segments_ready && job.segments_ready[i];
+        const isCurrent = job.status === `waiting_flow_segment_${seg.index}`;
+        body += `<div class="card p-2 mb-3 bg-black ${isCurrent ? 'border-warning' : 'border-secondary'}">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <span><span class="badge bg-primary">Segmen ${seg.index} • ${seg.duration_seconds || 8}s</span> ${ready ? '<span class="badge bg-success ms-1"><i class="bi bi-check2"></i> video ada</span>' : (isCurrent ? '<span class="badge bg-warning text-dark ms-1">menunggu video</span>' : '')}</span>
+            <button class="btn btn-sm btn-outline-info py-0" onclick="copyPrompt(${job.id}, ${i})"><i class="bi bi-clipboard me-1"></i>Salin prompt</button>
+          </div>
+          <p class="prompt-text text-white mb-2">${esc(seg.prompt)}</p>
+          <div class="border-top border-secondary pt-2 d-flex flex-wrap gap-2 align-items-center">
+            <div class="input-group input-group-sm" style="max-width:420px">
+              <input type="file" id="file_seg_${job.id}_${seg.index}" accept="video/mp4,video/quicktime,video/webm,video/*" class="form-control form-control-sm">
+              <button class="btn btn-outline-success" onclick="uploadSegmentFile(${job.id}, ${seg.index})" ${job.is_terminal ? 'disabled' : ''}><i class="bi bi-upload me-1"></i>Kirim video</button>
+            </div>
+            ${ready ? `<a class="btn btn-sm btn-outline-light" target="_blank" href="/api/jobs/${job.id}/segments/${seg.index}"><i class="bi bi-play me-1"></i>Lihat segmen</a>` : ''}
+          </div></div>`;
+      });
+      body += `<div class="small text-muted mb-3">Atau simpan file manual ke <code>data/flow_downloads/job_${job.id}_segment_&lt;n&gt;.mp4</code>. Prompt juga tersimpan di <code>data/prompts/</code>.</div>`;
+    } else if (!job.is_terminal) {
+      body += `<div class="p-3 text-center text-muted small"><i class="bi bi-hourglass-split me-1"></i>Prompt AI sedang disiapkan oleh worker...</div>`;
+    }
+    if (job.metadata) {
+      body += `<h6 class="fw-bold text-info mt-2 mb-2"><i class="bi bi-youtube me-1"></i>Metadata YouTube</h6>
+        <div class="card p-2 bg-black border-secondary small">
+          <div><strong>Judul:</strong> ${esc(job.metadata.title)}</div>
+          <div class="mt-1"><strong>Deskripsi:</strong> <span class="prompt-text">${esc(job.metadata.description)}</span></div>
+          <div class="mt-1"><strong>Hashtag:</strong> ${esc((job.metadata.hashtags || []).join(' '))}</div>
+          <div class="mt-1"><strong>Tags:</strong> ${esc((job.metadata.tags || []).join(', '))}</div>
+        </div>`;
+    }
+    document.getElementById('modalJobBody').innerHTML = body;
+    if (show) {
+      const modalEl = document.getElementById('jobModal');
+      const modal = bootstrap.Modal.getOrCreateInstance(modalEl); modal.show();
+      modalEl.addEventListener('hidden.bs.modal', () => { openJobId = null; }, { once: true });
+    }
+  }
+  function closeModal() { const m = bootstrap.Modal.getInstance(document.getElementById('jobModal')); if (m) m.hide(); }
+
+  async function copyPrompt(jobId, idx) {
+    const job = cachedJobs.find(x => x.id === jobId); if (!job) return;
+    const text = job.plan.segments[idx].prompt;
+    try { await navigator.clipboard.writeText(text); toast('Prompt disalin. Tempel di Google Flow.', 'success'); }
+    catch (e) { window.prompt('Salin prompt berikut:', text); }
+  }
+  async function simulateJob(jobId) {
+    try { const data = await api(`/api/jobs/${jobId}/simulate`, { method: 'POST' }); toast(data.message, 'success'); fetchData(); }
+    catch (e) { toast('Simulasi gagal: ' + e.message, 'danger'); }
+  }
+  async function uploadSegmentFile(jobId, segIndex) {
+    const input = document.getElementById(`file_seg_${jobId}_${segIndex}`);
+    if (!input.files || !input.files.length) { toast('Pilih file video terlebih dahulu.', 'warning'); return; }
+    const fd = new FormData(); fd.append('segment_index', segIndex); fd.append('file', input.files[0]);
+    toast(`Mengunggah segmen ${segIndex}...`, 'info');
+    try {
+      const data = await api(`/api/jobs/${jobId}/upload-segment`, { method: 'POST', body: fd });
+      toast(`Segmen ${segIndex} tersimpan (${data.duration.toFixed(1)}s, ${data.width}x${data.height}). Worker melanjutkan otomatis.`, 'success');
+      fetchData();
+    } catch (e) { toast('Gagal mengunggah: ' + e.message, 'danger'); }
+  }
+  async function retryJob(id) { try { await api(`/api/jobs/${id}/retry`, { method: 'POST' }); toast(`Job #${id} diulang`, 'success'); fetchData(); } catch (e) { toast(e.message, 'danger'); } }
+  async function cancelJob(id) { if (!confirm(`Batalkan job #${id}?`)) return; try { await api(`/api/jobs/${id}/cancel`, { method: 'POST' }); toast(`Job #${id} dibatalkan`, 'warning'); fetchData(); } catch (e) { toast(e.message, 'danger'); } }
+  async function deleteJob(id) {
+    const purge = confirm(`Hapus job #${id}?\n\nOK = hapus job DAN file (prompt, segmen, video output)\nCancel = batal`);
+    if (!purge) return;
+    try { await api(`/api/jobs/${id}?purge=true`, { method: 'DELETE' }); toast(`Job #${id} dihapus`, 'info'); closeModal(); fetchData(); } catch (e) { toast(e.message, 'danger'); }
+  }
+  async function fetchLogs() {
+    try {
+      const src = document.getElementById('logSource').value;
+      const r = await fetch(`/api/logs?source=${src}&lines=200`); const text = await r.text();
+      const el = document.getElementById('logBox'); const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      el.innerText = text; if (atBottom) el.scrollTop = el.scrollHeight;
+    } catch (e) {}
+  }
+  function refreshAll() { fetchStatus(); fetchData(); fetchLogs(); }
+
+  refreshAll();
+  setInterval(fetchData, 4000);
+  setInterval(fetchStatus, 6000);
+  setInterval(fetchLogs, 5000);
+</script>
+</body>
+</html>

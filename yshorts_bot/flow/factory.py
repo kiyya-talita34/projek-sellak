@@ -2,30 +2,36 @@ from __future__ import annotations
 
 from ..config import AppConfig
 from .base import FlowProvider
-from .manual import ManualFlowProvider
 from .browser_stub import BrowserFlowProvider
+from .manual import ManualFlowProvider
 from .playwright_provider import PlaywrightFlowProvider
+from .veo_api import VeoApiFlowProvider
+
+FLOW_PROVIDERS = ("manual", "browser", "veo_api")
 
 
 def build_flow_provider(cfg: AppConfig) -> FlowProvider:
-    if cfg.flow.provider == "manual":
+    provider = cfg.flow.provider
+    if provider == "manual":
         return ManualFlowProvider(
             prompt_dir=cfg.paths.prompt_dir,
             flow_download_dir=cfg.paths.flow_download_dir,
-            wait_timeout_minutes=cfg.flow.wait_timeout_minutes,
-            poll_seconds=cfg.flow.poll_seconds,
+            min_video_bytes=cfg.flow.min_video_bytes,
+            stable_seconds=cfg.flow.stable_seconds,
         )
-    if cfg.flow.provider in ("browser", "playwright"):
+    if provider in ("browser", "playwright"):
         return PlaywrightFlowProvider(
             prompt_dir=cfg.paths.prompt_dir,
             flow_download_dir=cfg.paths.flow_download_dir,
-            flow_url=cfg.flow.flow_url,
-            browser_user_data_dir=cfg.flow.browser_user_data_dir,
-            headless=cfg.flow.headless,
-            generation_timeout_seconds=cfg.flow.generation_timeout_seconds,
-            wait_timeout_minutes=cfg.flow.wait_timeout_minutes,
-            poll_seconds=cfg.flow.poll_seconds,
+            flow_cfg=cfg.flow,
+            log_dir=cfg.paths.log_dir,
         )
-    if cfg.flow.provider == "browser_stub":
+    if provider == "veo_api":
+        return VeoApiFlowProvider(
+            prompt_dir=cfg.paths.prompt_dir,
+            flow_download_dir=cfg.paths.flow_download_dir,
+            veo_cfg=cfg.flow.veo,
+        )
+    if provider == "browser_stub":
         return BrowserFlowProvider()
-    raise ValueError(f"Flow provider tidak dikenal: {cfg.flow.provider}")
+    raise ValueError(f"Flow provider tidak dikenal: {provider}. Pilihan: {', '.join(FLOW_PROVIDERS)}")
