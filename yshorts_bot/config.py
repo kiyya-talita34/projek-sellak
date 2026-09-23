@@ -17,6 +17,15 @@ log = logging.getLogger(__name__)
 
 EXAMPLE_CONFIG_NAME = "config.example.json"
 
+DEFAULT_NICHE_PRESETS = [
+    "Fakta unik dunia",
+    "Cerita horor misteri",
+    "Fakta menarik tentang hewan",
+    "Motivasi & pola pikir sukses",
+    "Misteri sejarah kuno",
+    "Perkembangan teknologi AI masa depan",
+]
+
 
 # ---------------------------------------------------------------------------
 # Util waktu
@@ -79,7 +88,7 @@ class ScheduleConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_mode(self) -> "ScheduleConfig":
+    def _validate_mode(self) -> ScheduleConfig:
         if self.mode == "specific_times" and not self.specific_times:
             raise ValueError("schedule.specific_times tidak boleh kosong saat mode='specific_times'")
         return self
@@ -133,7 +142,7 @@ class VeoApiConfig(BaseModel):
     model: str = "veo-3.1-generate-preview"
     resolution: Literal["720p", "1080p", "4k"] = "720p"
     aspect_ratio: Literal["9:16", "16:9"] = "9:16"
-    duration_seconds: int | None = 8
+    duration_seconds: Literal[4, 6, 8] | None = 8
     negative_prompt: str = ""
     poll_seconds: int = Field(default=15, ge=5)
     timeout_seconds: int = Field(default=1200, ge=60)
@@ -152,6 +161,10 @@ class FlowConfig(BaseModel):
     poll_seconds: int = Field(default=10, ge=1)
     min_video_bytes: int = Field(default=1024, ge=1)
     stable_seconds: int = Field(default=3, ge=0)
+    # Folder "inbox": file video apa pun yang diletakkan di sini otomatis dipasangkan
+    # ke job/segmen yang sedang menunggu (urut job & segmen). Cocok sebagai folder download browser.
+    inbox_dir: str = "data/flow_downloads/inbox"
+    inbox_auto_assign: bool = True
     selectors: FlowSelectors = Field(default_factory=FlowSelectors)
     veo: VeoApiConfig = Field(default_factory=VeoApiConfig)
 
@@ -162,6 +175,11 @@ class YouTubeConfig(BaseModel):
     category_id: str = "22"
     default_language: str = "id"
     notify_subscribers: bool = True
+    # true = job berhenti di 'awaiting_approval' setelah metadata siap; Anda meninjau/mengedit
+    # judul-deskripsi di dashboard lalu klik Setujui sebelum upload.
+    require_approval: bool = False
+    # Opsional: ID playlist tujuan (butuh izin OAuth 'youtube' penuh saat login).
+    playlist_id: str = ""
 
 
 class RetryConfig(BaseModel):
@@ -185,12 +203,43 @@ class VideoConfig(BaseModel):
     min_duration_seconds: float = Field(default=16.0, ge=0)
     pad_to_min_duration: bool = True
     ffmpeg_binary: str | None = None
+    # Musik latar: file audio (mp3/m4a/wav/ogg/flac) dipilih acak dari folder ini.
+    # off = tidak pernah, auto = hanya bila semua segmen tanpa suara, always = selalu dicampur di bawah audio asli
+    background_music_dir: str | None = "data/music"
+    background_music_mode: Literal["off", "auto", "always"] = "auto"
+    background_music_volume: float = Field(default=0.15, ge=0.0, le=1.0)
+    background_music_fade_seconds: float = Field(default=1.5, ge=0.0)
 
 
 class WorkerConfig(BaseModel):
     idle_sleep_seconds: int = Field(default=5, ge=1)
-    heartbeat_seconds: int = Field(default=15, ge=1)
+    # Heartbeat dikirim dari thread terpisah; dashboard menganggap worker mati bila > 90 detik tanpa detak.
+    heartbeat_seconds: int = Field(default=15, ge=1, le=30)
     reload_config: bool = True
+
+
+class AIConfig(BaseModel):
+    """Pengarah gaya AI. Prompt video tetap bahasa Inggris (paling akurat untuk Veo/Flow)."""
+
+    language: str = "id"  # bahasa untuk ide, hook, judul, deskripsi (kode ISO: id, en, ms, ...)
+    style_notes: str = ""  # preferensi tambahan, mis. "nada dramatis, akhiri dengan pertanyaan"
+    temperature: float = Field(default=0.8, ge=0.0, le=2.0)
+
+
+class NotificationsConfig(BaseModel):
+    """Notifikasi Telegram / webhook (Discord, Slack, generik). Kredensial di .env:
+    TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, dan/atau NOTIFY_WEBHOOK_URL."""
+
+    enabled: bool = False
+    on_done: bool = True
+    on_failed: bool = True
+    on_awaiting_approval: bool = True
+    dashboard_url: str = "http://127.0.0.1:8000"
+
+
+class MaintenanceConfig(BaseModel):
+    delete_segments_after_upload: bool = False
+    delete_output_after_upload: bool = False
 
 
 class AppConfig(BaseModel):
@@ -198,6 +247,7 @@ class AppConfig(BaseModel):
     total_videos: int = Field(default=10, ge=1)
     segments_per_video: int = Field(default=2, ge=1, le=6)
     segment_duration_seconds: int = Field(default=8, ge=1)
+    niche_presets: list[str] = Field(default_factory=lambda: list(DEFAULT_NICHE_PRESETS))
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     flow: FlowConfig = Field(default_factory=FlowConfig)
@@ -205,6 +255,15 @@ class AppConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+
+    @field_validator("niche_presets")
+    @classmethod
+    def _validate_presets(cls, v: list[str]) -> list[str]:
+        cleaned = [str(x).strip() for x in v if str(x).strip()]
+        return cleaned[:12]
 
     @property
     def planned_duration_seconds(self) -> int:
@@ -282,6 +341,9 @@ def ensure_dirs(cfg: AppConfig) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
         else:
             path.mkdir(parents=True, exist_ok=True)
+    Path(cfg.flow.inbox_dir).mkdir(parents=True, exist_ok=True)
+    if cfg.video.background_music_dir:
+        Path(cfg.video.background_music_dir).mkdir(parents=True, exist_ok=True)
 
 
 def env(name: str, default: str | None = None) -> str | None:

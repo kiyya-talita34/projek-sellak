@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yshorts-bot"
-version = "1.1.0"
+version = "1.2.0"
 description = "AI-assisted YouTube Shorts automation queue (Google Flow + FFmpeg + YouTube Data API)"
 requires-python = ">=3.10"
 readme = "README.md"

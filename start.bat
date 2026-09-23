@@ -6,11 +6,10 @@ echo ========================================================
 echo  YShorts Bot Studio - Dashboard + Worker
 echo ========================================================
 
-where python >nul 2>nul
+python -c "import sys; assert sys.version_info >= (3, 10)" >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Python tidak ditemukan di PATH.
-  echo         Install Python 3.10+ dari https://www.python.org/downloads/
-  echo         dan centang "Add python.exe to PATH" saat instalasi.
+  echo [ERROR] Python 3.10+ tidak ditemukan di PATH ^(atau yang terpasang hanya alias Microsoft Store^).
+  echo         Install dari https://www.python.org/downloads/ dan centang "Add python.exe to PATH".
   pause
   exit /b 1
 )
@@ -23,7 +22,7 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
   )
-  echo [SETUP] Menginstall dependensi (sekali saja, mohon tunggu) ...
+  echo [SETUP] Menginstall dependensi ^(sekali saja, mohon tunggu^) ...
   ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
   ".venv\Scripts\python.exe" -m pip install -r requirements.txt
   if errorlevel 1 (
@@ -49,13 +48,25 @@ echo [CHECK] Memeriksa kesiapan sistem ...
 echo.
 
 start "YShorts Bot Dashboard" cmd /k ""%PY%" -m yshorts_bot dashboard --host 127.0.0.1 --port 8000"
-timeout /t 3 >nul
-start http://127.0.0.1:8000
 start "YShorts Bot Worker" cmd /k ""%PY%" -m yshorts_bot run"
+
+echo [WAIT] Menunggu dashboard siap ...
+set /a tries=0
+:waitloop
+set /a tries+=1
+curl -s -o nul http://127.0.0.1:8000/api/health >nul 2>nul
+if not errorlevel 1 goto :open
+if %tries% geq 30 goto :open
+timeout /t 1 >nul
+goto :waitloop
+
+:open
+start http://127.0.0.1:8000
 
 echo ========================================================
 echo  Dashboard : http://127.0.0.1:8000
 echo  Worker    : jendela "YShorts Bot Worker"
+echo  Inbox     : data\flow_downloads\inbox  ^(taruh hasil Google Flow di sini^)
 echo  Tutup kedua jendela tersebut untuk menghentikan sistem.
 echo ========================================================
 pause

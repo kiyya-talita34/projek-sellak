@@ -5,6 +5,8 @@ from typing import Any
 import pytest
 
 from yshorts_bot.ai.planner import (
+    build_metadata,
+    build_system_prompt,
     clean_hashtags,
     clean_tags,
     create_metadata,
@@ -12,6 +14,7 @@ from yshorts_bot.ai.planner import (
     sanitize_title,
 )
 from yshorts_bot.ai.provider import AIProvider, MockAIProvider, parse_json_lenient
+from yshorts_bot.config import AIConfig
 from yshorts_bot.models import Metadata, VideoPlan
 
 
@@ -21,9 +24,13 @@ class FakeProvider(AIProvider):
     def __init__(self, *responses: dict[str, Any]):
         self.responses = list(responses)
         self.calls = 0
+        self.systems: list[str] = []
+        self.temperatures: list[float | None] = []
 
-    def generate_json(self, system: str, user: str) -> dict[str, Any]:
+    def generate_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         self.calls += 1
+        self.systems.append(system)
+        self.temperatures.append(temperature)
         if len(self.responses) > 1:
             return self.responses.pop(0)
         return self.responses[0]
@@ -61,6 +68,18 @@ def test_plan_missing_fields_fall_back():
     assert plan.idea and plan.hook and plan.style
 
 
+def test_ai_config_steers_language_style_and_temperature():
+    data = {"idea": "i", "style": "s", "hook": "h", "segments": [{"prompt": "a"}, {"prompt": "b"}]}
+    provider = FakeProvider(data)
+    ai_cfg = AIConfig(language="en", style_notes="Nada dramatis, akhiri dengan pertanyaan", temperature=0.3)
+    create_video_plan(provider, "x", 2, 8, ai_cfg)
+    assert provider.temperatures == [0.3]
+    assert "English" in provider.systems[0] and "Nada dramatis" in provider.systems[0]
+    system_default = build_system_prompt(2, 8)
+    assert "Bahasa Indonesia" in system_default and "PREFERENSI" not in system_default
+    assert "xx-custom" in build_system_prompt(2, 8, AIConfig(language="xx-custom"))
+
+
 def test_metadata_is_sanitized():
     data = {
         "title": "<b>Judul</b> " + "kata " * 40,
@@ -71,11 +90,20 @@ def test_metadata_is_sanitized():
     plan = VideoPlan(idea="ide", style="s", hook="hook", segments=[])
     meta = create_metadata(FakeProvider(data), "niche", plan)
     assert "<" not in meta.title and ">" not in meta.title
+    assert meta.title.startswith("Judul kata")
     assert len(meta.title) <= 100
     assert meta.hashtags == ["#Shorts", "#Fakta", "#unik"]
     assert meta.tags == ["a", "b", "x"]
-    assert "<" not in meta.description
+    assert "<" not in meta.description and "script" not in meta.description
     assert meta.description_with_hashtags().endswith("#Shorts #Fakta #unik")
+
+
+def test_build_metadata_from_user_input():
+    meta = build_metadata({"title": "", "description": None, "hashtags": ["#A", "a"], "tags": None}, "Fallback judul", "Fallback deskripsi", "niche")
+    assert meta.title == "Fallback judul" and meta.description == "Fallback deskripsi"
+    assert meta.hashtags == ["#Shorts", "#A"] and meta.tags == ["niche", "shorts"]
+    nested = build_metadata({"metadata": {"title": "Nested"}}, "f", "f", "n")
+    assert nested.title == "Nested"
 
 
 def test_metadata_nested_and_defaults():

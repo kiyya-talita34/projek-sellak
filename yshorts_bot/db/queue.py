@@ -15,6 +15,7 @@ STATUSES = [
     "waiting_flow",
     "merging",
     "metadata",
+    "awaiting_approval",
     "scheduled",
     "uploading",
     "done",
@@ -23,11 +24,16 @@ STATUSES = [
 ]
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 PROCESSING_STATUSES = {"planning", "merging", "metadata", "uploading"}
+# Status yang tidak boleh diambil worker walau next_run_at kosong
+INACTIVE_STATUSES = TERMINAL_STATUSES | {"awaiting_approval"}
+# Status yang boleh diedit metadatanya (sudah ada metadata, belum terupload)
+METADATA_EDITABLE_STATUSES = {"awaiting_approval", "scheduled", "uploading", "failed", "cancelled"}
 
 _JOB_COLUMNS: dict[str, str] = {
     "scheduled_upload_at": "TEXT",
     "flow_waiting_since": "TEXT",
     "failed_from_status": "TEXT",
+    "uploaded_at": "TEXT",
 }
 
 
@@ -45,6 +51,10 @@ def waiting_segment_index(status: str) -> int:
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _placeholders(values: list[str] | set[str]) -> str:
+    return ",".join("?" for _ in values)
 
 
 class QueueDB:
@@ -86,6 +96,7 @@ class QueueDB:
                     scheduled_upload_at TEXT,
                     flow_waiting_since TEXT,
                     failed_from_status TEXT,
+                    uploaded_at TEXT,
                     idea TEXT,
                     plan_json TEXT,
                     metadata_json TEXT,
@@ -139,14 +150,15 @@ class QueueDB:
     def next_job(self, now: str | None = None) -> dict[str, Any] | None:
         """Job berikutnya yang siap diproses (yang paling lama menunggu lebih dulu)."""
         now = now or utcnow()
+        inactive = sorted(INACTIVE_STATUSES)
         with self.connect() as con:
             row = con.execute(
-                """SELECT * FROM jobs
-                WHERE status NOT IN ('done','failed','cancelled')
+                f"""SELECT * FROM jobs
+                WHERE status NOT IN ({_placeholders(inactive)})
                   AND (next_run_at IS NULL OR next_run_at <= ?)
                 ORDER BY (next_run_at IS NULL) DESC, next_run_at ASC, id ASC
                 LIMIT 1""",
-                (now,),
+                (*inactive, now),
             ).fetchone()
             return dict(row) if row else None
 
@@ -155,15 +167,22 @@ class QueueDB:
             row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             return dict(row) if row else None
 
-    def update(self, job_id: int, **fields: Any) -> None:
+    def update(self, job_id: int, expected_status: str | None = None, **fields: Any) -> bool:
+        """Perbarui kolom job. Bila `expected_status` diisi, hanya berlaku jika status masih sama
+        (compare-and-swap) - mencegah worker menimpa aksi Batalkan/Retry dari dashboard."""
         if not fields:
-            return
+            return False
         fields["updated_at"] = utcnow()
         keys = list(fields.keys())
         values = [json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for v in fields.values()]
         set_clause = ", ".join(f"{k}=?" for k in keys)
+        where, params = "id=?", values + [job_id]
+        if expected_status is not None:
+            where += " AND status=?"
+            params.append(expected_status)
         with self.connect() as con:
-            con.execute(f"UPDATE jobs SET {set_clause} WHERE id=?", values + [job_id])
+            cur = con.execute(f"UPDATE jobs SET {set_clause} WHERE {where}", params)
+            return cur.rowcount > 0
 
     def increment_attempt(self, job_id: int, error: str, next_run_at: str | None = None) -> None:
         with self.connect() as con:
@@ -193,6 +212,22 @@ class QueueDB:
             rows = con.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
 
+    def list_by_status(self, statuses: set[str] | list[str], prefix: str | None = None) -> list[dict[str, Any]]:
+        """Job dengan status tertentu (dan/atau berawalan `prefix`, mis. 'waiting_flow_segment_'), urut id."""
+        statuses = list(statuses)
+        clauses, params = [], []
+        if statuses:
+            clauses.append(f"status IN ({_placeholders(statuses)})")
+            params.extend(statuses)
+        if prefix:
+            clauses.append("status LIKE ?")
+            params.append(prefix + "%")
+        if not clauses:
+            return []
+        with self.connect() as con:
+            rows = con.execute(f"SELECT * FROM jobs WHERE {' OR '.join(clauses)} ORDER BY id ASC", params).fetchall()
+            return [dict(r) for r in rows]
+
     def retry_job(self, job_id: int) -> bool:
         """Ulangi job dari tahap tempat ia gagal (bukan dari awal), supaya hasil sebelumnya tidak terbuang."""
         job = self.get(job_id)
@@ -205,28 +240,83 @@ class QueueDB:
         if not target or target in TERMINAL_STATUSES:
             target = "queued"
         now = utcnow()
+        if target == "awaiting_approval":
+            next_run = None
+        elif target == "scheduled" and job.get("scheduled_upload_at"):
+            next_run = job["scheduled_upload_at"]  # hormati jadwal, jangan upload segera
+        else:
+            next_run = now
         with self.connect() as con:
             cur = con.execute(
                 """UPDATE jobs SET status=?, attempts=0, last_error=NULL, failed_from_status=NULL,
                 flow_waiting_since=NULL, next_run_at=?, updated_at=? WHERE id=?""",
-                (target, now, now, job_id),
+                (target, next_run, now, job_id),
             )
             return cur.rowcount > 0
 
     def cancel_job(self, job_id: int) -> bool:
         with self.connect() as con:
             cur = con.execute(
-                """UPDATE jobs SET failed_from_status=status, status='cancelled',
-                last_error='Dibatalkan oleh pengguna', next_run_at=NULL, updated_at=?
+                """UPDATE jobs SET
+                    failed_from_status = CASE WHEN status='failed' THEN failed_from_status ELSE status END,
+                    status='cancelled', last_error='Dibatalkan oleh pengguna', next_run_at=NULL, updated_at=?
                 WHERE id=? AND status NOT IN ('done','cancelled')""",
                 (utcnow(), job_id),
             )
             return cur.rowcount > 0
 
+    def approve_job(self, job_id: int, upload_now: bool = False) -> bool:
+        """Setujui job yang menunggu persetujuan -> 'scheduled' (upload sesuai jadwal atau sekarang)."""
+        job = self.get(job_id)
+        if not job or job["status"] != "awaiting_approval":
+            return False
+        now = utcnow()
+        scheduled = job.get("scheduled_upload_at") or now
+        if upload_now or scheduled < now:
+            scheduled = now
+        self.update(job_id, status="scheduled", scheduled_upload_at=scheduled, next_run_at=scheduled, last_error=None)
+        return True
+
+    def reschedule_job(self, job_id: int, scheduled_upload_at: str) -> bool:
+        job = self.get(job_id)
+        if not job:
+            return False
+        fields: dict[str, Any] = {"scheduled_upload_at": scheduled_upload_at}
+        if job["status"] == "scheduled":
+            fields["next_run_at"] = scheduled_upload_at
+        self.update(job_id, **fields)
+        return True
+
     def delete_job(self, job_id: int) -> bool:
         with self.connect() as con:
             cur = con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             return cur.rowcount > 0
+
+    # ------------------------------------------------------------------ aksi massal
+    def bulk_retry_failed(self) -> list[int]:
+        ids = [j["id"] for j in self.list_by_status({"failed"})]
+        return [i for i in ids if self.retry_job(i)]
+
+    def bulk_cancel_pending(self) -> list[int]:
+        """Batalkan semua job yang belum selesai/terupload (kecuali yang sedang uploading)."""
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT id FROM jobs WHERE status NOT IN ('done','failed','cancelled','uploading')"
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if ids:
+                con.execute(
+                    f"""UPDATE jobs SET
+                        failed_from_status = CASE WHEN status='failed' THEN failed_from_status ELSE status END,
+                        status='cancelled', last_error='Dibatalkan massal oleh pengguna', next_run_at=NULL, updated_at=?
+                    WHERE id IN ({_placeholders(ids)})""",
+                    (utcnow(), *ids),
+                )
+        return ids
+
+    def bulk_approve(self) -> list[int]:
+        ids = [j["id"] for j in self.list_by_status({"awaiting_approval"})]
+        return [i for i in ids if self.approve_job(i)]
 
     def get_stats(self) -> dict[str, int]:
         with self.connect() as con:

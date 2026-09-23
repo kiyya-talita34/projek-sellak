@@ -41,7 +41,10 @@ def build_upload_schedule(cfg: ScheduleConfig, count: int, now: datetime | None 
             first = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
             while first <= now_local:
                 first += step
-        return [to_utc_iso(first + step * i) for i in range(count)]
+        # Aritmetika dilakukan di UTC agar jarak antar slot selalu tepat `interval_hours`,
+        # termasuk saat peralihan DST di zona waktu yang memakainya.
+        first_utc = first.astimezone(timezone.utc)
+        return [to_utc_iso(first_utc + step * i) for i in range(count)]
 
     times = sorted({parse_hhmm(t) for t in cfg.specific_times})
     if not times:

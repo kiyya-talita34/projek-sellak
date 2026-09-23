@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -48,14 +49,22 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (("retry", "ulangi job dari tahap gagal"), ("cancel", "batalkan job")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("job_id", type=int)
+    p_approve = sub.add_parser("approve", help="setujui job yang menunggu persetujuan (atau semua)")
+    p_approve.add_argument("job_id", type=int, nargs="?", help="ID job; kosongkan + --all untuk semua")
+    p_approve.add_argument("--all", action="store_true")
+    p_approve.add_argument("--now", action="store_true", help="upload sekarang, abaikan jadwal")
     sub.add_parser("pause", help="jeda worker (job tidak diproses)")
     sub.add_parser("resume", help="lanjutkan worker")
+
+    p_export = sub.add_parser("export", help="ekspor daftar job ke CSV")
+    p_export.add_argument("--out", default="data/jobs_export.csv")
 
     p_dash = sub.add_parser("dashboard", help="jalankan web dashboard")
     p_dash.add_argument("--host", default="127.0.0.1")
     p_dash.add_argument("--port", type=int, default=8000)
 
     sub.add_parser("youtube-auth", help="login Google sekali untuk menyimpan token upload YouTube")
+    sub.add_parser("notify-test", help="kirim notifikasi uji ke Telegram/webhook")
     sub.add_parser("doctor", help="periksa kesiapan sistem (ffmpeg, AI, Flow, YouTube, jadwal)")
     return parser
 
@@ -110,10 +119,25 @@ def main(argv: list[str] | None = None) -> None:
         ok = db.retry_job(args.job_id) if args.cmd == "retry" else db.cancel_job(args.job_id)
         job = db.get(args.job_id)
         print(f"Job #{args.job_id}: {'OK' if ok else 'tidak ada perubahan'} -> status {job['status'] if job else 'tidak ditemukan'}")
+    elif args.cmd == "approve":
+        db.init()
+        if args.all:
+            ids = db.bulk_approve()
+            print(f"{len(ids)} job disetujui: {ids}")
+        elif args.job_id:
+            ok = db.approve_job(args.job_id, upload_now=args.now)
+            job = db.get(args.job_id)
+            print(f"Job #{args.job_id}: {'disetujui' if ok else 'tidak menunggu persetujuan'} -> status {job['status'] if job else 'tidak ditemukan'}")
+        else:
+            raise SystemExit("Sebutkan job_id atau gunakan --all")
     elif args.cmd in ("pause", "resume"):
         db.init()
         db.set_meta("worker_paused", "1" if args.cmd == "pause" else "0")
         print("Worker dijeda." if args.cmd == "pause" else "Worker dilanjutkan.")
+    elif args.cmd == "export":
+        db.init()
+        path = cmd_export(db, args.out)
+        print(f"CSV tersimpan: {path}")
     elif args.cmd == "dashboard":
         try:
             import uvicorn
@@ -122,10 +146,14 @@ def main(argv: list[str] | None = None) -> None:
         except ModuleNotFoundError as e:
             raise SystemExit("Dashboard membutuhkan paket tambahan. Jalankan: pip install -r requirements.txt") from e
         app = create_app(args.config)
+        if args.host not in ("127.0.0.1", "localhost") and not (os.getenv("DASHBOARD_USERNAME") and os.getenv("DASHBOARD_PASSWORD")):
+            print("[PERINGATAN] Dashboard dibuka untuk jaringan tanpa login. Set DASHBOARD_USERNAME & DASHBOARD_PASSWORD di .env.")
         print(f"Dashboard: http://{args.host}:{args.port}  (Ctrl+C untuk berhenti)")
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     elif args.cmd == "youtube-auth":
-        cmd_youtube_auth()
+        cmd_youtube_auth(cfg)
+    elif args.cmd == "notify-test":
+        cmd_notify_test(cfg)
     elif args.cmd == "doctor":
         sys.exit(cmd_doctor(cfg, args.config))
 
@@ -148,7 +176,6 @@ def cmd_enqueue(cfg: AppConfig, db: QueueDB, args: argparse.Namespace) -> None:
         sched_data["start_time"] = args.start_time
     if args.times:
         sched_data["specific_times"] = [t.strip() for t in args.times.split(",") if t.strip()]
-        sched_data.setdefault("mode", "specific_times")
         if not args.mode:
             sched_data["mode"] = "specific_times"
     try:
@@ -173,7 +200,8 @@ def cmd_status(db: QueueDB, limit: int, as_json: bool) -> None:
     meta = db.all_meta()
     print(
         f"Total {stats['total']} | antrean {stats['queued']} | diproses {stats['processing']} | "
-        f"terjadwal {stats['scheduled']} | selesai {stats['done']} | gagal/batal {stats['failed_or_cancelled']}"
+        f"perlu persetujuan {stats['awaiting_approval']} | terjadwal {stats['scheduled']} | "
+        f"selesai {stats['done']} | gagal/batal {stats['failed_or_cancelled']}"
     )
     print(
         f"Worker: {'ONLINE' if worker_online(meta) else 'offline'} | heartbeat {meta.get('worker_heartbeat') or '-'} | "
@@ -189,10 +217,31 @@ def cmd_status(db: QueueDB, limit: int, as_json: bool) -> None:
         print(f"{j['id']:>4} | {j['status']:<24} | {str(j.get('scheduled_upload_at') or '-'):<25} | {j['attempts']}/{j['max_attempts']:<3} | {j['niche']}{idea}{err}")
 
 
-def cmd_youtube_auth() -> None:
+def cmd_export(db: QueueDB, out: str) -> Path:
+    path = Path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["id", "status", "niche", "idea", "title", "youtube_url", "scheduled_upload_at", "uploaded_at", "created_at", "attempts", "output_path", "last_error"])
+        for job in reversed(db.list_jobs(100000)):
+            try:
+                meta = json.loads(job.get("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                meta = {}
+            vid = job.get("youtube_video_id") or ""
+            url = f"https://youtube.com/shorts/{vid}" if vid and not vid.startswith("demo_") else ""
+            writer.writerow([
+                job["id"], job["status"], job["niche"], job.get("idea") or "", meta.get("title", ""), url,
+                job.get("scheduled_upload_at") or "", job.get("uploaded_at") or "", job.get("created_at") or "",
+                job.get("attempts"), job.get("output_path") or "", (job.get("last_error") or "")[:500],
+            ])
+    return path
+
+
+def cmd_youtube_auth(cfg: AppConfig) -> None:
     from .youtube.uploader import YouTubeUploader
 
-    uploader = YouTubeUploader()
+    uploader = YouTubeUploader(playlist_id=cfg.youtube.playlist_id)
     if uploader.mock:
         print("YOUTUBE_MOCK_UPLOAD=true di .env -> upload disimulasikan, login tidak diperlukan.")
         return
@@ -202,6 +251,19 @@ def cmd_youtube_auth() -> None:
     else:
         print("Login berhasil, tetapi akun ini belum memiliki channel YouTube.")
     print(f"Token tersimpan di {uploader.token_file}")
+
+
+def cmd_notify_test(cfg: AppConfig) -> None:
+    from .notify import Notifier
+
+    notifier = Notifier(cfg.notifications)
+    if not notifier.channels:
+        raise SystemExit("Belum ada kanal notifikasi. Isi TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID dan/atau NOTIFY_WEBHOOK_URL di .env.")
+    results = notifier.send_sync("[YShorts] Tes notifikasi berhasil. Sistem siap mengirim kabar job.", {"event": "test"})
+    for channel, result in results.items():
+        print(f"{channel}: {result}")
+    if not cfg.notifications.enabled:
+        print("Catatan: notifications.enabled=false di config.json -> notifikasi job belum aktif.")
 
 
 def cmd_doctor(cfg: AppConfig, config_path: str) -> int:
@@ -240,7 +302,7 @@ def cmd_doctor(cfg: AppConfig, config_path: str) -> int:
 
     provider = cfg.flow.provider
     if provider == "manual":
-        ok("Flow", "manual/assisted: salin prompt ke Google Flow, unggah MP4 via dashboard (aman sesuai ToS)")
+        ok("Flow", f"manual/assisted: salin prompt ke Google Flow, unggah MP4 via dashboard atau letakkan di inbox {Path(cfg.flow.inbox_dir).resolve()}")
     elif provider in ("browser", "playwright"):
         try:
             import playwright  # noqa: F401
@@ -260,12 +322,31 @@ def cmd_doctor(cfg: AppConfig, config_path: str) -> int:
         secret = Path(os.getenv("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json"))
         token = Path(os.getenv("YOUTUBE_TOKEN_FILE", "secrets/token.json"))
         if token.exists():
-            ok("YouTube", f"token OAuth ada ({token}); privasi upload={cfg.youtube.privacy_status}")
+            ok("YouTube", f"token OAuth ada ({token}); privasi upload={cfg.youtube.privacy_status}; persetujuan={'ya' if cfg.youtube.require_approval else 'tidak'}")
         elif secret.exists():
             warn("YouTube", "client_secret ada, token belum. Jalankan: python -m yshorts_bot youtube-auth")
         else:
             fail("YouTube", f"{secret} tidak ditemukan. Unduh OAuth client (Desktop app) dari Google Cloud Console atau set YOUTUBE_MOCK_UPLOAD=true")
         warn("YouTube kuota", "Kuota default YouTube Data API 10.000 unit/hari; 1 upload = 1.600 unit (~6 upload/hari). Ajukan kenaikan kuota bila perlu.")
+        if cfg.youtube.playlist_id:
+            ok("Playlist", f"video akan ditambahkan ke playlist {cfg.youtube.playlist_id} (butuh izin 'youtube' saat login)")
+
+    from .notify import Notifier
+
+    notifier = Notifier(cfg.notifications)
+    if cfg.notifications.enabled and not notifier.channels:
+        fail("Notifikasi", "notifications.enabled=true tetapi TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID atau NOTIFY_WEBHOOK_URL belum diisi di .env")
+    elif notifier.channels:
+        (ok if cfg.notifications.enabled else warn)("Notifikasi", f"kanal: {', '.join(notifier.channels)} | enabled={cfg.notifications.enabled}. Uji: python -m yshorts_bot notify-test")
+    else:
+        warn("Notifikasi", "tidak dikonfigurasi (opsional): Telegram/webhook untuk kabar job selesai/gagal")
+
+    music_dir = cfg.video.background_music_dir
+    if cfg.video.background_music_mode != "off":
+        from .video.ffmpeg import AUDIO_EXTENSIONS
+
+        count = len([p for p in Path(music_dir).glob("*") if p.suffix.lower() in AUDIO_EXTENSIONS]) if music_dir and Path(music_dir).is_dir() else 0
+        (ok if count else warn)("Musik latar", f"mode={cfg.video.background_music_mode} volume={cfg.video.background_music_volume} | {count} file di {music_dir} (kosong = tanpa musik)")
 
     try:
         times = build_upload_schedule(cfg.schedule, 3)
@@ -283,6 +364,11 @@ def cmd_doctor(cfg: AppConfig, config_path: str) -> int:
 
     if cfg.planned_duration_seconds < cfg.video.min_duration_seconds and not cfg.video.pad_to_min_duration:
         warn("Durasi", f"{cfg.segments_per_video}x{cfg.segment_duration_seconds}s = {cfg.planned_duration_seconds}s < min {cfg.video.min_duration_seconds}s dan pad_to_min_duration=false")
+
+    if os.getenv("DASHBOARD_USERNAME") and os.getenv("DASHBOARD_PASSWORD"):
+        ok("Dashboard", "login Basic Auth aktif (DASHBOARD_USERNAME/PASSWORD)")
+    else:
+        warn("Dashboard", "tanpa login; aman selama hanya diakses dari komputer ini (127.0.0.1)")
 
     width = max(len(r[1]) for r in results)
     for level, name, msg in results:

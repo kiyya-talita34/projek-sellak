@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from ..config import VideoConfig
 log = logging.getLogger(__name__)
 
 _FFMPEG_CACHE: str | None = None
+AUDIO_EXTENSIONS = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac", ".opus")
 
 
 class FFmpegError(RuntimeError):
@@ -27,7 +30,10 @@ def resolve_ffmpeg(cfg: VideoConfig | None = None) -> str:
     if configured:
         if Path(configured).exists():
             return str(configured)
-        raise FileNotFoundError(f"video.ffmpeg_binary menunjuk ke file yang tidak ada: {configured}")
+        found_configured = shutil.which(configured)
+        if found_configured:
+            return found_configured
+        raise FileNotFoundError(f"video.ffmpeg_binary tidak ditemukan (bukan file dan tidak ada di PATH): {configured}")
     if _FFMPEG_CACHE and Path(_FFMPEG_CACHE).exists():
         return _FFMPEG_CACHE
     env_bin = os.getenv("FFMPEG_BINARY")
@@ -48,6 +54,18 @@ def resolve_ffmpeg(cfg: VideoConfig | None = None) -> str:
             "ffmpeg tidak ditemukan. Install FFmpeg (https://ffmpeg.org/download.html) dan pastikan ada di PATH, "
             "atau jalankan `pip install imageio-ffmpeg`, atau isi video.ffmpeg_binary di config.json."
         ) from e
+
+
+def replace_with_retry(src: Path, dst: Path, attempts: int = 6, delay: float = 0.5) -> None:
+    """os.replace dengan pengulangan: di Windows rename gagal (PermissionError) bila file tujuan sedang dibuka."""
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay * attempt)
 
 
 def run_ffmpeg(args: list[str], ffmpeg: str | None = None) -> str:
@@ -86,6 +104,9 @@ def probe(path: str | Path, ffmpeg: str | None = None) -> MediaInfo:
         if "Stream #" not in line:
             continue
         if re.search(r":\s*Video:", line):
+            # Gambar sampul (cover art) mp3/m4a juga terdeteksi sebagai Video (attached pic); abaikan.
+            if "attached pic" in line:
+                continue
             info.has_video = True
             dims = re.search(r"\b(\d{2,5})x(\d{2,5})\b", line.split("Video:", 1)[1])
             if dims and not info.width:
@@ -125,8 +146,56 @@ def make_test_clip(
         args += ["-c:a", "aac", "-shortest"]
     args += ["-movflags", "+faststart", str(tmp)]
     run_ffmpeg(args, ffmpeg)
-    os.replace(tmp, dest)
+    replace_with_retry(tmp, dest)
     return dest
+
+
+def make_test_audio(dest: str | Path, seconds: float = 10.0, frequency: int = 220, ffmpeg: str | None = None) -> Path:
+    """Buat file audio uji (nada sinus) untuk musik latar."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part" + dest.suffix)
+    codec = ["-c:a", "aac"] if dest.suffix.lower() in (".m4a", ".aac", ".mp4") else ["-c:a", "pcm_s16le"]
+    run_ffmpeg(["-y", "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000", "-t", f"{seconds:.3f}", *codec, str(tmp)], ffmpeg)
+    replace_with_retry(tmp, dest)
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# Musik latar
+# ---------------------------------------------------------------------------
+def pick_background_music(music_dir: str | Path | None, rng: random.Random | None = None) -> Path | None:
+    """Pilih satu file audio secara acak dari folder musik (None bila kosong/tidak ada)."""
+    if not music_dir:
+        return None
+    base = Path(music_dir)
+    if not base.is_dir():
+        return None
+    files = [p for p in base.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS and p.stat().st_size > 1024]
+    if not files:
+        return None
+    return (rng or random).choice(sorted(files))
+
+
+def mix_background_music(video_in: Path, music: Path, video_out: Path, cfg: VideoConfig, duration: float, ffmpeg: str) -> None:
+    """Campurkan musik (di-loop, volume rendah, fade out) di bawah audio video. Video tidak di-encode ulang."""
+    fade = min(cfg.background_music_fade_seconds, max(duration / 2, 0))
+    music_chain = f"[1:a]volume={cfg.background_music_volume:.3f}"
+    if fade > 0.05 and duration > fade:
+        music_chain += f",afade=t=out:st={duration - fade:.3f}:d={fade:.3f}"
+    music_chain += "[m]"
+    filter_complex = f"{music_chain};[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+    run_ffmpeg(
+        [
+            "-y", "-i", str(video_in), "-stream_loop", "-1", "-i", str(music),
+            "-filter_complex", filter_complex,
+            "-map", "0:v:0", "-map", "[a]",
+            "-c:v", "copy", "-c:a", "aac", "-ar", str(cfg.audio_sample_rate), "-ac", "2", "-b:a", cfg.audio_bitrate,
+            "-t", f"{duration:.3f}", "-movflags", "+faststart",
+            str(video_out),
+        ],
+        ffmpeg,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,12 +244,18 @@ def _normalize_segment(src: Path, dst: Path, cfg: VideoConfig, ffmpeg: str, info
     run_ffmpeg(args, ffmpeg)
 
 
-def merge_for_shorts(segment_paths: list[str | Path], output_path: str | Path, cfg: VideoConfig) -> Path:
+def merge_for_shorts(
+    segment_paths: list[str | Path],
+    output_path: str | Path,
+    cfg: VideoConfig,
+    music_path: str | Path | None = None,
+) -> Path:
     """Normalisasi setiap segmen ke 9:16 (default 1080x1920, H.264 + AAC) lalu gabungkan menjadi satu MP4.
 
     - Segmen tanpa audio diberi track audio hening (YouTube lebih stabil memproses file ber-audio).
     - Bila total durasi < video.min_duration_seconds dan pad_to_min_duration aktif, frame terakhir
       diperpanjang (tpad) supaya durasi minimal tercapai.
+    - Musik latar (video.background_music_*) dicampur setelah penggabungan; `music_path` memaksa file tertentu.
     - Ditulis ke file sementara lalu di-rename atomik ke output akhir.
     """
     if not segment_paths:
@@ -193,12 +268,14 @@ def merge_for_shorts(segment_paths: list[str | Path], output_path: str | Path, c
         sources = [Path(p) for p in segment_paths]
         infos = [probe(p, ffmpeg) for p in sources]
         for src, info in zip(sources, infos):
-            if not info.has_video or info.duration <= 0:
+            if not info.has_video:
                 raise FFmpegError(f"Segmen tidak memiliki stream video yang valid: {src}")
-        total = sum(i.duration for i in infos)
-        deficit = max(0.0, cfg.min_duration_seconds - total) if cfg.pad_to_min_duration else 0.0
+        # Durasi bisa "N/A" (WebM/fragmented MP4) -> 0; segmen seperti itu tetap diproses, padding dicek lagi setelah concat.
+        known_total = sum(i.duration for i in infos)
+        durations_known = all(i.duration > 0 for i in infos)
+        deficit = max(0.0, cfg.min_duration_seconds - known_total) if (cfg.pad_to_min_duration and durations_known) else 0.0
         if deficit > 0.05:
-            log.info("Total durasi segmen %.2fs < %.0fs; frame akhir diperpanjang %.2fs.", total, cfg.min_duration_seconds, deficit)
+            log.info("Total durasi segmen %.2fs < %.0fs; frame akhir diperpanjang %.2fs.", known_total, cfg.min_duration_seconds, deficit)
 
         normalized: list[Path] = []
         for i, (src, info) in enumerate(zip(sources, infos), start=1):
@@ -215,19 +292,54 @@ def merge_for_shorts(segment_paths: list[str | Path], output_path: str | Path, c
             lines.append(f"file '{escaped}'\n")
         concat_file.write_text("".join(lines), encoding="utf-8")
 
-        tmp_out = tmp_dir / f"{output.stem}.merged.mp4"
-        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", "-movflags", "+faststart", str(tmp_out)], ffmpeg)
+        merged = tmp_dir / f"{output.stem}.merged.mp4"
+        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", "-movflags", "+faststart", str(merged)], ffmpeg)
 
-        result = probe(tmp_out, ffmpeg)
+        result = probe(merged, ffmpeg)
         if not result.has_video or result.duration <= 0:
             raise FFmpegError("Hasil penggabungan tidak valid (tidak ada stream video).")
         if (result.width, result.height) != (cfg.width, cfg.height):
             raise FFmpegError(f"Resolusi hasil {result.width}x{result.height} tidak sesuai target {cfg.width}x{cfg.height}.")
-        if result.duration + 0.5 < cfg.min_duration_seconds:
+        late_deficit = cfg.min_duration_seconds - result.duration
+        if cfg.pad_to_min_duration and late_deficit > 0.25:
+            # Durasi sumber tadi tidak diketahui -> perpanjang frame akhir pada hasil gabungan (encode ulang sekali).
+            log.info("Durasi gabungan %.2fs < %.0fs; frame akhir diperpanjang %.2fs.", result.duration, cfg.min_duration_seconds, late_deficit)
+            padded = tmp_dir / f"{output.stem}.padded.mp4"
+            run_ffmpeg(
+                [
+                    "-y", "-i", str(merged),
+                    "-vf", f"tpad=stop_mode=clone:stop_duration={late_deficit:.3f}", "-af", f"apad=pad_dur={late_deficit:.3f}",
+                    "-c:v", "libx264", "-preset", cfg.x264_preset, "-b:v", cfg.video_bitrate, "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", str(cfg.audio_sample_rate), "-ac", "2", "-b:a", cfg.audio_bitrate,
+                    "-movflags", "+faststart", str(padded),
+                ],
+                ffmpeg,
+            )
+            merged = padded
+            result = probe(merged, ffmpeg)
+        elif result.duration + 0.5 < cfg.min_duration_seconds:
             log.warning("Durasi output %.2fs masih di bawah target %.0fs.", result.duration, cfg.min_duration_seconds)
 
-        os.replace(tmp_out, output)
-        log.info("Output Shorts siap: %s (%.2fs, %sx%s)", output, result.duration, result.width, result.height)
+        # Musik latar
+        final = merged
+        music: Path | None = Path(music_path) if music_path else None
+        if music is None and cfg.background_music_mode != "off":
+            any_audio = any(i.has_audio for i in infos)
+            if cfg.background_music_mode == "always" or not any_audio:
+                music = pick_background_music(cfg.background_music_dir)
+        if music is not None:
+            if not music.is_file():
+                raise FileNotFoundError(f"File musik tidak ditemukan: {music}")
+            with_music = tmp_dir / f"{output.stem}.music.mp4"
+            log.info("Menambahkan musik latar %s (volume %.2f)", music.name, cfg.background_music_volume)
+            mix_background_music(merged, music, with_music, cfg, result.duration, ffmpeg)
+            check = probe(with_music, ffmpeg)
+            if not check.has_video or not check.has_audio:
+                raise FFmpegError("Hasil pencampuran musik tidak valid.")
+            final = with_music
+
+        replace_with_retry(final, output)
+        log.info("Output Shorts siap: %s (%.2fs, %sx%s%s)", output, result.duration, result.width, result.height, ", +musik" if music else "")
         return output
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

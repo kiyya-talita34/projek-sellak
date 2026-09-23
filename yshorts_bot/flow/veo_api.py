@@ -74,7 +74,13 @@ class VeoApiFlowProvider(FlowProvider):
 
     def _download(self, uri: str, dest: Path) -> None:
         tmp = dest.with_name(dest.name + ".part")
-        with requests.get(uri, headers={"x-goog-api-key": self.api_key or ""}, stream=True, allow_redirects=True, timeout=600) as r:
+        headers = {"x-goog-api-key": self.api_key or ""}
+        # Jangan ikut mengirim API key ke host lain bila di-redirect: ikuti Location secara manual tanpa header kunci.
+        response = requests.get(uri, headers=headers, stream=True, allow_redirects=False, timeout=600)
+        if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("Location"):
+            response.close()
+            response = requests.get(response.headers["Location"], stream=True, allow_redirects=True, timeout=600)
+        with response as r:
             if r.status_code in (401, 403):
                 raise NonRetryableError(f"Veo API menolak download (HTTP {r.status_code})")
             r.raise_for_status()

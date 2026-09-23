@@ -13,10 +13,10 @@ from ..models import Metadata
 
 log = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",
-]
+SCOPE_UPLOAD = "https://www.googleapis.com/auth/youtube.upload"
+SCOPE_READONLY = "https://www.googleapis.com/auth/youtube.readonly"
+SCOPE_MANAGE = "https://www.googleapis.com/auth/youtube"  # dibutuhkan untuk menambah ke playlist
+BASE_SCOPES = [SCOPE_UPLOAD, SCOPE_READONLY]
 CHUNK_SIZE = 8 * 1024 * 1024  # kelipatan 256 KiB, upload resumable
 
 QUOTA_REASONS = {"quotaExceeded", "dailyLimitExceeded", "userRateLimitExceeded", "rateLimitExceeded"}
@@ -44,11 +44,19 @@ def _parse_http_error(error: Any) -> tuple[int, str, str]:
 class YouTubeUploader:
     """Upload resmi lewat YouTube Data API v3 + OAuth 2.0 (Desktop app client)."""
 
-    def __init__(self, client_secret_file: str | None = None, token_file: str | None = None, mock: bool | None = None):
+    def __init__(
+        self,
+        client_secret_file: str | None = None,
+        token_file: str | None = None,
+        mock: bool | None = None,
+        playlist_id: str | None = None,
+    ):
         self.client_secret_file = client_secret_file or os.getenv("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")
         self.token_file = token_file or os.getenv("YOUTUBE_TOKEN_FILE", "secrets/token.json")
         self.mock = env_flag("YOUTUBE_MOCK_UPLOAD", False) if mock is None else mock
         self.interactive_auth = env_flag("YOUTUBE_INTERACTIVE_AUTH", True)
+        self.playlist_id = (playlist_id or "").strip()
+        self.scopes = BASE_SCOPES + ([SCOPE_MANAGE] if self.playlist_id else [])
         Path(self.token_file).parent.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ auth
@@ -68,18 +76,20 @@ class YouTubeUploader:
         token_path = Path(self.token_file)
         if token_path.exists():
             try:
-                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-            except (ValueError, json.JSONDecodeError) as e:
+                creds = Credentials.from_authorized_user_file(str(token_path), self.scopes)
+                # google-auth menimpa scope dengan argumen di atas, jadi bandingkan dengan scope yang TERSIMPAN.
+                stored = set(json.loads(token_path.read_text(encoding="utf-8")).get("scopes") or [])
+            except (ValueError, json.JSONDecodeError, OSError) as e:
                 log.warning("File token %s rusak (%s); login ulang diperlukan.", token_path, e)
+                creds, stored = None, set()
+            if creds is not None and stored and not set(self.scopes) <= stored:
+                log.info("Izin token lama tidak mencakup scope yang dibutuhkan; login ulang diperlukan.")
                 creds = None
-        if creds is not None and not creds.has_scopes(SCOPES):
-            log.info("Scope token lama berbeda; login ulang untuk memperbarui izin.")
-            creds = None
 
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                token_path.write_text(creds.to_json(), encoding="utf-8")
+                self._write_token(token_path, creds)
             except RefreshError as e:
                 raise NonRetryableError(
                     f"Refresh token YouTube gagal ({e}). Jalankan ulang: python -m yshorts_bot youtube-auth"
@@ -97,13 +107,22 @@ class YouTubeUploader:
                     "Unduh client_secret.json (OAuth client ID tipe Desktop app) dari Google Cloud Console, "
                     "atau set YOUTUBE_MOCK_UPLOAD=true di .env untuk simulasi."
                 )
-            flow = InstalledAppFlow.from_client_secrets_file(self.client_secret_file, SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(self.client_secret_file, self.scopes)
             log.info("Membuka browser untuk login Google / izin YouTube...")
             creds = flow.run_local_server(port=0, prompt="consent", authorization_prompt_message="")
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(creds.to_json(), encoding="utf-8")
+            self._write_token(token_path, creds)
             log.info("Token OAuth tersimpan di %s", token_path)
         return creds
+
+    @staticmethod
+    def _write_token(token_path: Path, creds: Any) -> None:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+        if os.name != "nt":
+            try:
+                os.chmod(token_path, 0o600)
+            except OSError:
+                pass
 
     def _service(self, interactive: bool) -> Any:
         try:
@@ -190,6 +209,31 @@ class YouTubeUploader:
         video_id = response["id"]
         log.info("Upload selesai: https://youtube.com/shorts/%s", video_id)
         return video_id
+
+    def add_to_playlist(self, video_id: str, playlist_id: str | None = None) -> bool:
+        """Tambahkan video ke playlist. Kegagalan hanya dicatat (tidak menggagalkan job)."""
+        playlist_id = (playlist_id or self.playlist_id or "").strip()
+        if not playlist_id:
+            return False
+        if self.mock or str(video_id).startswith("demo_"):
+            log.info("[MOCK UPLOAD] Video %s 'ditambahkan' ke playlist %s", video_id, playlist_id)
+            return True
+        try:
+            youtube = self._service(interactive=False)
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                },
+            ).execute()
+            log.info("Video %s ditambahkan ke playlist %s", video_id, playlist_id)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("Gagal menambahkan video %s ke playlist %s: %s", video_id, playlist_id, e)
+            return False
 
     @staticmethod
     def _raise_translated(error: Any) -> None:

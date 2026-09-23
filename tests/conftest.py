@@ -44,14 +44,34 @@ def tmp_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppConfig:
             "log_dir": str(data / "logs"),
             "db_path": str(data / "test.sqlite3"),
         },
-        flow={"provider": "manual", "poll_seconds": 1, "stable_seconds": 0, "wait_timeout_minutes": 60},
+        flow={
+            "provider": "manual",
+            "poll_seconds": 1,
+            "stable_seconds": 0,
+            "wait_timeout_minutes": 60,
+            "inbox_dir": str(data / "flow_downloads" / "inbox"),
+        },
         retry={"max_attempts": 2, "base_delay_seconds": 1},
-        video={"width": 540, "height": 960, "x264_preset": "ultrafast", "video_bitrate": "800k", "min_duration_seconds": 3},
+        video={
+            "width": 540,
+            "height": 960,
+            "x264_preset": "ultrafast",
+            "video_bitrate": "800k",
+            "min_duration_seconds": 3,
+            "background_music_mode": "off",
+            "background_music_dir": str(data / "music"),
+        },
         worker={"idle_sleep_seconds": 1, "heartbeat_seconds": 1},
     )
     ensure_dirs(cfg)
     monkeypatch.setenv("AI_PROVIDER", "mock")
     monkeypatch.setenv("YOUTUBE_MOCK_UPLOAD", "true")
     monkeypatch.setenv("YOUTUBE_TOKEN_FILE", str(tmp_path / "secrets" / "token.json"))
+    monkeypatch.delenv("DASHBOARD_USERNAME", raising=False)
+    monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
+    monkeypatch.delenv("NOTIFY_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.chdir(tmp_path)
     return cfg

@@ -1,0 +1,3 @@
+-r requirements.txt
+# Otomasi browser Google Flow (eksperimental). Setelah install jalankan: playwright install chromium
+playwright>=1.44.0

@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any
 
+from ..config import AIConfig
 from ..models import YOUTUBE_TITLE_MAX, Metadata, SegmentPrompt, VideoPlan
 from .provider import AIProvider
 
@@ -18,21 +19,45 @@ MAX_TAG_LENGTH = 30
 MAX_TAGS_TOTAL_LENGTH = 400
 DESCRIPTION_SOFT_MAX = 4500
 
+LANGUAGE_NAMES = {
+    "id": "Bahasa Indonesia",
+    "en": "English",
+    "ms": "Bahasa Melayu",
+    "jv": "Bahasa Jawa",
+    "es": "Español",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "ja": "日本語",
+    "ko": "한국어",
+    "ar": "العربية",
+    "hi": "हिन्दी",
+    "zh": "中文",
+}
 
-def build_system_prompt(segments: int, segment_duration: int) -> str:
+
+def language_name(code: str) -> str:
+    code = (code or "id").strip()
+    return LANGUAGE_NAMES.get(code.lower(), code)
+
+
+def build_system_prompt(segments: int, segment_duration: int, ai_cfg: AIConfig | None = None) -> str:
+    ai_cfg = ai_cfg or AIConfig()
     total = segments * segment_duration
+    lang = language_name(ai_cfg.language)
+    extra = f"\n7. PREFERENSI PEMILIK CHANNEL (wajib diikuti): {ai_cfg.style_notes.strip()}" if ai_cfg.style_notes.strip() else ""
     return f"""
 Anda adalah AI Creative Director spesialis konten YouTube Shorts viral sekaligus AI Video Prompter ahli Google Flow / Veo.
 Tugas Anda:
 1. Membaca niche/topik dan menciptakan konsep video Shorts berdurasi total sekitar {total} detik
    (terdiri dari TEPAT {segments} segmen, masing-masing {segment_duration} detik).
 2. Menghasilkan prompt video untuk Google Flow dalam bahasa Inggris yang sangat deskriptif, sinematik, dan optimal
-   (subjek, aksi, latar, pencahayaan, gerakan kamera, mood).
+   (subjek, aksi, latar, pencahayaan, gerakan kamera, mood). Ide, hook, judul, dan deskripsi ditulis dalam {lang}.
 3. KONTINUITAS: jaga konsistensi karakter/subjek, palet warna, pencahayaan, dan gaya visual antar segmen.
    Segmen berikutnya adalah kelanjutan langsung segmen sebelumnya (satu cerita utuh, ada hook di awal dan payoff di akhir).
 4. FORMAT: setiap prompt wajib menyertakan arahan '{MANDATORY_STYLE}'.
 5. PANTANGAN: setiap prompt wajib menyertakan '{NEGATIVE_DIRECTIVES}'.
-6. Kembalikan HANYA JSON valid tanpa markdown, tanpa komentar.
+6. Kembalikan HANYA JSON valid tanpa markdown, tanpa komentar.{extra}
 """.strip()
 
 
@@ -49,7 +74,7 @@ Target: YouTube Shorts 9:16, total sekitar {segments * segment_duration} detik.
 {strict_note}
 Buat JSON dengan schema persis seperti ini:
 {{
-  "idea": "ide video singkat (bahasa Indonesia)",
+  "idea": "ide video singkat",
   "style": "gaya visual",
   "hook": "kalimat pembuka yang bikin penasaran",
   "segments": [
@@ -118,9 +143,16 @@ def normalize_segments(raw: Any, niche: str, segments: int, segment_duration: in
     return result, exact
 
 
-def create_video_plan(provider: AIProvider, niche: str, segments: int = 2, segment_duration: int = 8) -> VideoPlan:
-    system = build_system_prompt(segments, segment_duration)
-    data = provider.generate_json(system, _plan_user_prompt(niche, segments, segment_duration))
+def create_video_plan(
+    provider: AIProvider,
+    niche: str,
+    segments: int = 2,
+    segment_duration: int = 8,
+    ai_cfg: AIConfig | None = None,
+) -> VideoPlan:
+    ai_cfg = ai_cfg or AIConfig()
+    system = build_system_prompt(segments, segment_duration, ai_cfg)
+    data = provider.generate_json(system, _plan_user_prompt(niche, segments, segment_duration), temperature=ai_cfg.temperature)
     segs, exact = normalize_segments(data, niche, segments, segment_duration)
     if not exact:
         log.warning(
@@ -129,7 +161,9 @@ def create_video_plan(provider: AIProvider, niche: str, segments: int = 2, segme
         )
         strict = f"PENTING: array \"segments\" WAJIB berisi TEPAT {segments} objek dengan index 1..{segments}."
         try:
-            data2 = provider.generate_json(system, _plan_user_prompt(niche, segments, segment_duration, strict))
+            data2 = provider.generate_json(
+                system, _plan_user_prompt(niche, segments, segment_duration, strict), temperature=ai_cfg.temperature
+            )
             segs2, exact2 = normalize_segments(data2, niche, segments, segment_duration)
             if exact2:
                 data, segs = data2, segs2
@@ -191,8 +225,14 @@ def clean_tags(value: Any, fallback: list[str]) -> list[str]:
     return result
 
 
+def _strip_markup(value: Any) -> str:
+    """Buang tag HTML lalu karakter '<' '>' yang tersisa (YouTube menolak keduanya)."""
+    text = re.sub(r"<[^>]*>", " ", str(value or ""))
+    return re.sub(r"[<>]", "", text)
+
+
 def sanitize_title(title: Any, fallback: str) -> str:
-    text = re.sub(r"[<>]", "", str(title or "")).strip()
+    text = _strip_markup(title).strip()
     text = " ".join(text.split()) or fallback
     if len(text) > YOUTUBE_TITLE_MAX:
         cut = text[:YOUTUBE_TITLE_MAX]
@@ -201,12 +241,26 @@ def sanitize_title(title: Any, fallback: str) -> str:
 
 
 def sanitize_description(description: Any, fallback: str) -> str:
-    text = re.sub(r"[<>]", "", str(description or "")).strip() or fallback
+    text = _strip_markup(description).strip() or fallback
     return text[:DESCRIPTION_SOFT_MAX].rstrip()
 
 
-def create_metadata(provider: AIProvider, niche: str, plan: VideoPlan) -> Metadata:
-    system = build_system_prompt(len(plan.segments) or 2, plan.segments[0].duration_seconds if plan.segments else 8)
+def build_metadata(data: dict[str, Any], fallback_title: str, fallback_description: str, niche: str) -> Metadata:
+    """Bentuk Metadata yang aman untuk YouTube dari dict apa pun (output AI atau input pengguna)."""
+    if isinstance(data.get("metadata"), dict):
+        data = data["metadata"]
+    return Metadata(
+        title=sanitize_title(data.get("title"), fallback_title),
+        description=sanitize_description(data.get("description"), fallback_description),
+        hashtags=clean_hashtags(data.get("hashtags")),
+        tags=clean_tags(data.get("tags"), [niche, "shorts"]),
+    )
+
+
+def create_metadata(provider: AIProvider, niche: str, plan: VideoPlan, ai_cfg: AIConfig | None = None) -> Metadata:
+    ai_cfg = ai_cfg or AIConfig()
+    lang = language_name(ai_cfg.language)
+    system = build_system_prompt(len(plan.segments) or 2, plan.segments[0].duration_seconds if plan.segments else 8, ai_cfg)
     user = f"""
 Niche: {niche}
 Ide: {plan.idea}
@@ -214,15 +268,8 @@ Hook: {plan.hook}
 Style: {plan.style}
 Prompt segmen: {[s.prompt for s in plan.segments]}
 
-Buat metadata YouTube Shorts (bahasa Indonesia, menarik, tanpa clickbait berlebihan) dalam JSON:
+Buat metadata YouTube Shorts dalam {lang} (menarik, tanpa clickbait berlebihan) dalam JSON:
 {{"title":"maks 100 karakter, sertakan #Shorts", "description":"2-4 kalimat + ajakan like/subscribe", "hashtags":["#Shorts", "..."], "tags":["kata kunci", "..."]}}
 """.strip()
-    data = provider.generate_json(system, user)
-    if isinstance(data.get("metadata"), dict):
-        data = data["metadata"]
-    return Metadata(
-        title=sanitize_title(data.get("title"), plan.idea),
-        description=sanitize_description(data.get("description"), plan.hook),
-        hashtags=clean_hashtags(data.get("hashtags")),
-        tags=clean_tags(data.get("tags"), [niche, "shorts"]),
-    )
+    data = provider.generate_json(system, user, temperature=ai_cfg.temperature)
+    return build_metadata(data, plan.idea, plan.hook, niche)

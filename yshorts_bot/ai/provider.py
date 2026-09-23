@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 
-from ..errors import NonRetryableError
+from ..errors import NonRetryableError, RetryLaterError
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 # Dicoba berurutan bila model utama sudah dipensiunkan (HTTP 404).
 GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_TEMPERATURE = 0.8
 
 RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
@@ -52,7 +53,7 @@ class AIProvider(ABC):
     name = "base"
 
     @abstractmethod
-    def generate_json(self, system: str, user: str) -> dict[str, Any]:
+    def generate_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         raise NotImplementedError
 
 
@@ -61,7 +62,7 @@ class MockAIProvider(AIProvider):
 
     name = "mock"
 
-    def generate_json(self, system: str, user: str) -> dict[str, Any]:
+    def generate_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         niche = _extract_field(user, "Niche", "Fakta menarik dunia")
         try:
             segments = int(_extract_field(user, "Jumlah segmen", "2"))
@@ -108,6 +109,16 @@ class _HttpProvider(AIProvider):
     max_attempts = 3
     timeout_seconds = 120
 
+    def _raise_if_rate_limited(self, response: requests.Response) -> None:
+        """HTTP 429 setelah retry singkat -> tunda job (RetryLaterError) tanpa menghabiskan jatah retry."""
+        if response.status_code != 429:
+            return
+        retry_after = response.headers.get("Retry-After", "")
+        delay = int(float(retry_after)) if retry_after.replace(".", "", 1).isdigit() else 300
+        raise RetryLaterError(
+            f"{self.name}: rate limit/kuota tercapai (HTTP 429): {response.text[:200]}", delay_seconds=max(delay, 60)
+        )
+
     def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """HTTP request dengan retry untuk error jaringan / 429 / 5xx."""
         last_error: Exception | None = None
@@ -144,7 +155,7 @@ class OpenAICompatibleProvider(_HttpProvider):
         if not self.api_key:
             raise NonRetryableError("OPENAI_API_KEY belum diset di .env. Gunakan AI_PROVIDER=mock untuk uji coba offline.")
 
-    def generate_json(self, system: str, user: str) -> dict[str, Any]:
+    def generate_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "response_format": {"type": "json_object"},
@@ -152,7 +163,7 @@ class OpenAICompatibleProvider(_HttpProvider):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.8,
+            "temperature": DEFAULT_TEMPERATURE if temperature is None else float(temperature),
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"
@@ -161,6 +172,7 @@ class OpenAICompatibleProvider(_HttpProvider):
             # Server kompatibel yang belum mendukung JSON mode
             payload.pop("response_format", None)
             response = self._request("POST", url, headers=headers, json=payload)
+        self._raise_if_rate_limited(response)
         if response.status_code in (401, 403):
             raise NonRetryableError(f"{self.name}: API key ditolak (HTTP {response.status_code}): {response.text[:300]}")
         if response.status_code == 404:
@@ -191,11 +203,14 @@ class GeminiProvider(_HttpProvider):
             )
         self._active_model = self.model
 
-    def generate_json(self, system: str, user: str) -> dict[str, Any]:
+    def generate_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.8},
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": DEFAULT_TEMPERATURE if temperature is None else float(temperature),
+            },
         }
         headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
         models = [self._active_model] + [m for m in GEMINI_FALLBACK_MODELS if m != self._active_model]
@@ -205,6 +220,7 @@ class GeminiProvider(_HttpProvider):
             if response.status_code == 404 and i < len(models) - 1:
                 log.warning("Model Gemini '%s' tidak tersedia (404). Beralih ke '%s'.", model, models[i + 1])
                 continue
+            self._raise_if_rate_limited(response)
             if response.status_code in (400, 401, 403):
                 raise NonRetryableError(f"Gemini menolak permintaan (HTTP {response.status_code}): {response.text[:300]}")
             response.raise_for_status()
