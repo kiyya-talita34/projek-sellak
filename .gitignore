@@ -1,8 +1,26 @@
+# Rahasia & konfigurasi lokal
 .env
 config.json
 client_secret.json
 secrets/
+
+# Data runtime (prompt, video, log, database, profil browser)
 data/
+*.part
+*.log
+
+# Python
 *.pyc
 __pycache__/
 .venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Editor
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

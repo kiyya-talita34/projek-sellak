@@ -3,6 +3,14 @@
   "total_videos": 10,
   "segments_per_video": 2,
   "segment_duration_seconds": 8,
+  "niche_presets": [
+    "Fakta unik dunia",
+    "Cerita horor misteri",
+    "Fakta menarik tentang hewan",
+    "Motivasi & pola pikir sukses",
+    "Misteri sejarah kuno",
+    "Perkembangan teknologi AI masa depan"
+  ],
   "schedule": {
     "mode": "interval",
     "interval_hours": 3,
@@ -21,23 +29,79 @@
   },
   "flow": {
     "provider": "manual",
+    "flow_url": "https://labs.google/flow",
+    "headless": false,
+    "browser_channel": "chrome",
+    "browser_user_data_dir": "data/browser_profile",
+    "auto_submit": true,
+    "login_wait_seconds": 180,
+    "generation_timeout_seconds": 600,
     "wait_timeout_minutes": 1440,
-    "poll_seconds": 10
+    "poll_seconds": 10,
+    "min_video_bytes": 1024,
+    "stable_seconds": 3,
+    "inbox_dir": "data/flow_downloads/inbox",
+    "inbox_auto_assign": true,
+    "veo": {
+      "model": "veo-3.1-generate-preview",
+      "resolution": "720p",
+      "aspect_ratio": "9:16",
+      "duration_seconds": 8,
+      "negative_prompt": "",
+      "poll_seconds": 15,
+      "timeout_seconds": 1200
+    }
   },
   "youtube": {
     "privacy_status": "private",
     "made_for_kids": false,
-    "category_id": "22"
+    "category_id": "22",
+    "default_language": "id",
+    "notify_subscribers": true,
+    "require_approval": false,
+    "playlist_id": ""
   },
   "retry": {
     "max_attempts": 3,
-    "base_delay_seconds": 60
+    "base_delay_seconds": 60,
+    "max_delay_seconds": 3600
   },
   "video": {
     "width": 1080,
     "height": 1920,
     "fps": 30,
     "video_bitrate": "8M",
-    "audio_bitrate": "192k"
+    "audio_bitrate": "192k",
+    "audio_sample_rate": 48000,
+    "x264_preset": "medium",
+    "fit_mode": "crop",
+    "min_duration_seconds": 16,
+    "pad_to_min_duration": true,
+    "ffmpeg_binary": null,
+    "background_music_dir": "data/music",
+    "background_music_mode": "auto",
+    "background_music_volume": 0.15,
+    "background_music_fade_seconds": 1.5
+  },
+  "worker": {
+    "idle_sleep_seconds": 5,
+    "heartbeat_seconds": 15,
+    "reload_config": true
+  },
+  "ai": {
+    "language": "id",
+    "style_notes": "",
+    "temperature": 0.8
+  },
+  "notifications": {
+    "enabled": false,
+    "on_done": true,
+    "on_failed": true,
+    "on_awaiting_approval": true,
+    "dashboard_url": "http://127.0.0.1:8000"
+  },
+  "maintenance": {
+    "delete_segments_after_upload": false,
+    "delete_output_after_upload": false
   }
 }

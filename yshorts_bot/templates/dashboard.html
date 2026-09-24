@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YShorts Bot Studio - Otomasi YouTube Shorts</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --muted: #94a3b8; }
+    body { background: var(--bg); color: #f8fafc; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+    .form-control, .form-select { background: #0b1220; color: #f8fafc; border-color: var(--border); }
+    .form-control:focus, .form-select:focus { background: #0b1220; color: #fff; border-color: #6366f1; box-shadow: none; }
+    .form-control::placeholder { color: #64748b; }
+    .form-check-input { background-color: #0b1220; border-color: var(--border); }
+    .form-check-input:checked { background-color: #6366f1; border-color: #6366f1; }
+    .stat-card { padding: .8rem .5rem; border-radius: 10px; text-align: center; background: rgba(255,255,255,.03); border: 1px solid var(--border); height: 100%; }
+    .stat-val { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+    .badge-status { font-size: .75rem; padding: .35rem .6rem; border-radius: 20px; white-space: nowrap; }
+    .st-queued { background: #3b82f6; } .st-planning { background: #8b5cf6; }
+    .st-waiting { background: #f59e0b; color: #000; } .st-merging { background: #eab308; color: #000; }
+    .st-metadata { background: #a855f7; } .st-approval { background: #f472b6; color: #000; }
+    .st-scheduled { background: #06b6d4; color: #000; } .st-uploading { background: #0ea5e9; }
+    .st-done { background: #10b981; } .st-failed { background: #ef4444; } .st-cancelled { background: #64748b; }
+    .preset-btn { font-size: .78rem; margin: 0 .35rem .35rem 0; border-radius: 20px; }
+    .terminal-box { background: #000; color: #38bdf8; font-family: Consolas, "Courier New", monospace; font-size: .76rem; height: 260px; overflow-y: auto; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+    .btn-action { padding: .2rem .5rem; font-size: .78rem; }
+    .text-muted, .form-text { color: var(--muted) !important; }
+    .pill { border-radius: 20px; padding: .3rem .7rem; font-size: .78rem; font-weight: 600; }
+    .pill-on { background: #064e3b; color: #6ee7b7; border: 1px solid #10b981; }
+    .pill-off { background: #450a0a; color: #fca5a5; border: 1px solid #ef4444; }
+    .pill-pause { background: #451a03; color: #fcd34d; border: 1px solid #f59e0b; }
+    .steps { display: flex; gap: 4px; flex-wrap: wrap; }
+    .step { flex: 1 1 auto; min-width: 72px; text-align: center; font-size: .68rem; padding: .3rem .2rem; border-radius: 6px; background: #0b1220; color: var(--muted); border: 1px solid var(--border); }
+    .step.done { background: #064e3b; color: #6ee7b7; border-color: #10b981; }
+    .step.active { background: #1e3a8a; color: #bfdbfe; border-color: #3b82f6; }
+    .step.failed { background: #450a0a; color: #fca5a5; border-color: #ef4444; }
+    .prompt-text { white-space: pre-wrap; font-size: .82rem; }
+    .table-dark { --bs-table-bg: transparent; }
+    .toast-container { z-index: 2000; }
+    .nav-tabs .nav-link { color: var(--muted); } .nav-tabs .nav-link.active { background: var(--card); color: #fff; border-color: var(--border) var(--border) var(--card); }
+    code { color: #fbbf24; }
+    .section-title { font-size: .85rem; font-weight: 700; color: #cbd5e1; margin: .9rem 0 .4rem; border-bottom: 1px solid var(--border); padding-bottom: .2rem; }
+    .dropdown-menu { background: #0b1220; border: 1px solid var(--border); } .dropdown-item { color: #e2e8f0; } .dropdown-item:hover { background: #1e293b; color: #fff; }
+  </style>
+</head>
+<body class="p-3 p-md-4">
+<div class="container-fluid">
+
+  <!-- Header -->
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4 pb-2 border-bottom border-secondary">
+    <div>
+      <h2 class="fw-bold mb-0 text-white"><i class="bi bi-youtube text-danger me-2"></i>YShorts Bot Studio <small class="text-muted fs-6" id="appVersion"></small></h2>
+      <p class="text-muted small mb-0">Niche &rarr; AI ide &amp; prompt &rarr; Google Flow &rarr; FFmpeg 9:16 &rarr; YouTube Shorts terjadwal</p>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <span class="pill pill-off" id="workerPill"><i class="bi bi-cpu me-1"></i>Worker: memeriksa...</span>
+      <span class="badge bg-secondary" id="providerBadge" title="Provider aktif"></span>
+      <span class="badge bg-dark border border-secondary d-none" id="inboxBadge" title="File di folder inbox yang belum dipasangkan"></span>
+      <button class="btn btn-outline-warning btn-sm" id="pauseBtn" onclick="togglePause()"><i class="bi bi-pause-fill me-1"></i>Jeda</button>
+      <button class="btn btn-outline-info btn-sm" onclick="refreshAll()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      <a href="/docs" target="_blank" class="btn btn-outline-light btn-sm"><i class="bi bi-code-slash me-1"></i>API</a>
+    </div>
+  </div>
+
+  <div class="alert alert-warning py-2 small d-none" id="workerAlert"></div>
+
+  <!-- Stats -->
+  <div class="row row-cols-2 row-cols-md-4 row-cols-xl-7 g-2 mb-4">
+    <div class="col"><div class="stat-card"><div class="text-muted small">Total</div><div class="stat-val text-white" id="stat-total">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Antrean</div><div class="stat-val text-primary" id="stat-queued">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Diproses / Flow</div><div class="stat-val text-warning" id="stat-processing">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Perlu persetujuan</div><div class="stat-val" style="color:#f472b6" id="stat-approval">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Terjadwal</div><div class="stat-val text-info" id="stat-scheduled">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Terupload</div><div class="stat-val text-success" id="stat-done">0</div></div></div>
+    <div class="col"><div class="stat-card"><div class="text-muted small">Gagal / Batal</div><div class="stat-val text-danger" id="stat-failed">0</div></div></div>
+  </div>
+
+  <div class="row g-4">
+    <!-- Kolom kiri -->
+    <div class="col-lg-4">
+      <ul class="nav nav-tabs mb-3" role="tablist">
+        <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabNew" type="button"><i class="bi bi-plus-circle me-1"></i>Buat Video</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabSettings" type="button" onclick="loadConfigForm()"><i class="bi bi-gear me-1"></i>Pengaturan</button></li>
+      </ul>
+      <div class="tab-content">
+        <!-- Tab: buat video -->
+        <div class="tab-pane fade show active" id="tabNew">
+          <div class="card p-3 shadow-sm">
+            <div class="mb-3">
+              <label class="form-label small fw-semibold"><i class="bi bi-magic me-1 text-warning"></i>Topik cepat:</label>
+              <div id="presetButtons"></div>
+            </div>
+            <form id="enqueueForm" onsubmit="handleEnqueue(event)">
+              <div class="mb-3">
+                <label class="form-label small fw-semibold">Niche / topik utama</label>
+                <input type="text" id="inputNiche" class="form-control form-control-sm" placeholder="Contoh: Fakta mengejutkan laut dalam" required maxlength="200">
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-5">
+                  <label class="form-label small fw-semibold">Jumlah video</label>
+                  <input type="number" id="inputCount" class="form-control form-control-sm" value="1" min="1" max="100" required>
+                </div>
+                <div class="col-7">
+                  <label class="form-label small fw-semibold">Mode jadwal</label>
+                  <select id="inputMode" class="form-select form-select-sm" onchange="toggleScheduleMode()">
+                    <option value="interval" selected>Interval tetap</option>
+                    <option value="specific_times">Jam tertentu</option>
+                  </select>
+                </div>
+              </div>
+              <div id="intervalFields">
+                <div class="row g-2 mb-3">
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Interval upload</label>
+                    <select id="inputInterval" class="form-select form-select-sm">
+                      <option value="1">Setiap 1 jam</option>
+                      <option value="3" selected>Setiap 3 jam</option>
+                      <option value="6">Setiap 6 jam</option>
+                      <option value="12">Setiap 12 jam</option>
+                      <option value="24">1 video / hari</option>
+                    </select>
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Jam mulai</label>
+                    <input type="time" id="inputStartTime" class="form-control form-control-sm" value="08:00">
+                    <div class="form-text">Kosongkan = mulai sekarang</div>
+                  </div>
+                </div>
+              </div>
+              <div id="specificFields" class="d-none mb-3">
+                <label class="form-label small fw-semibold">Jam upload (pisahkan dengan koma)</label>
+                <input type="text" id="inputTimes" class="form-control form-control-sm" value="08:00, 12:00, 18:00, 21:00">
+              </div>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="previewSchedule()"><i class="bi bi-calendar-week me-1"></i>Preview</button>
+                <button type="submit" class="btn btn-primary btn-sm flex-grow-1 fw-semibold"><i class="bi bi-send-fill me-1"></i>Tambah ke Antrean</button>
+              </div>
+              <div id="schedulePreview" class="small text-muted mt-2"></div>
+            </form>
+            <div class="mt-3 pt-3 border-top border-secondary">
+              <h6 class="small fw-bold text-muted mb-2"><i class="bi bi-info-circle me-1"></i>Alur otomatis</h6>
+              <ol class="small text-muted ps-3 mb-0">
+                <li>AI membuat ide + prompt segmen yang saling bersambung.</li>
+                <li>Video segmen dari Google Flow (<span id="flowModeHint">manual: salin prompt, unggah hasil di detail job</span>).</li>
+                <li>FFmpeg menggabungkan segmen menjadi Shorts 9:16 (&ge;16 detik, audio dijamin ada, musik latar opsional).</li>
+                <li>AI membuat judul/deskripsi/hashtag &rarr; <span id="approvalHint">upload ke YouTube sesuai jadwal</span>.</li>
+              </ol>
+              <div class="small text-muted mt-2 d-none" id="inboxHint"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: pengaturan -->
+        <div class="tab-pane fade" id="tabSettings">
+          <div class="card p-3 shadow-sm">
+            <form onsubmit="saveConfig(event)">
+              <h6 class="fw-bold mb-2"><i class="bi bi-sliders me-1 text-info"></i>Konfigurasi (<code>config.json</code>)</h6>
+              <div class="section-title">Konten</div>
+              <div class="row g-2 mb-2">
+                <div class="col-8"><label class="form-label small">Niche default</label><input id="cfgNiche" class="form-control form-control-sm"></div>
+                <div class="col-4"><label class="form-label small">Total video</label><input id="cfgTotal" type="number" min="1" class="form-control form-control-sm"></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Segmen / video</label><input id="cfgSegments" type="number" min="1" max="6" class="form-control form-control-sm"></div>
+                <div class="col-6"><label class="form-label small">Durasi segmen (detik)</label><input id="cfgSegDur" type="number" min="1" class="form-control form-control-sm"></div>
+              </div>
+              <div class="mb-2"><label class="form-label small">Topik cepat (pisahkan koma)</label><input id="cfgPresets" class="form-control form-control-sm"></div>
+              <div class="row g-2 mb-2">
+                <div class="col-4"><label class="form-label small">Bahasa AI</label><input id="cfgAiLang" class="form-control form-control-sm" placeholder="id"></div>
+                <div class="col-8"><label class="form-label small">Catatan gaya untuk AI</label><input id="cfgAiStyle" class="form-control form-control-sm" placeholder="mis. nada dramatis, akhiri dengan pertanyaan"></div>
+              </div>
+
+              <div class="section-title">Jadwal</div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Mode jadwal</label>
+                  <select id="cfgMode" class="form-select form-select-sm"><option value="interval">Interval</option><option value="specific_times">Jam tertentu</option></select></div>
+                <div class="col-6"><label class="form-label small">Interval (jam)</label><input id="cfgInterval" type="number" step="0.5" min="0.5" class="form-control form-control-sm"></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Jam mulai</label><input id="cfgStart" class="form-control form-control-sm" placeholder="08:00 / now"></div>
+                <div class="col-6"><label class="form-label small">Timezone</label><input id="cfgTz" class="form-control form-control-sm" placeholder="Asia/Jakarta"></div>
+              </div>
+              <div class="mb-2"><label class="form-label small">Jam tertentu (koma)</label><input id="cfgTimes" class="form-control form-control-sm"></div>
+
+              <div class="section-title">Sumber video &amp; FFmpeg</div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Sumber video (Flow)</label>
+                  <select id="cfgFlow" class="form-select form-select-sm">
+                    <option value="manual">manual (aman, ToS)</option>
+                    <option value="browser">browser (eksperimental)</option>
+                    <option value="veo_api">veo_api (resmi, berbayar)</option>
+                  </select></div>
+                <div class="col-6"><label class="form-label small">Fit video 9:16</label>
+                  <select id="cfgFit" class="form-select form-select-sm"><option value="crop">crop (isi penuh)</option><option value="blur">blur (latar blur)</option><option value="pad">pad (bar hitam)</option></select></div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Musik latar</label>
+                  <select id="cfgMusicMode" class="form-select form-select-sm"><option value="off">off</option><option value="auto">auto (bila segmen bisu)</option><option value="always">always (campur)</option></select></div>
+                <div class="col-6"><label class="form-label small">Volume musik (0-1)</label><input id="cfgMusicVol" type="number" step="0.05" min="0" max="1" class="form-control form-control-sm"></div>
+              </div>
+              <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="cfgInbox"><label class="form-check-label small" for="cfgInbox">Inbox otomatis: file di <code>data/flow_downloads/inbox</code> dipasangkan ke job yang menunggu</label></div>
+
+              <div class="section-title">YouTube &amp; upload</div>
+              <div class="row g-2 mb-2">
+                <div class="col-5"><label class="form-label small">Privasi</label>
+                  <select id="cfgPrivacy" class="form-select form-select-sm"><option value="private">private</option><option value="unlisted">unlisted</option><option value="public">public</option></select></div>
+                <div class="col-7"><label class="form-label small">Playlist ID (opsional)</label><input id="cfgPlaylist" class="form-control form-control-sm" placeholder="PLxxxxxxxx"></div>
+              </div>
+              <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="cfgApproval"><label class="form-check-label small" for="cfgApproval">Wajib persetujuan saya sebelum upload (tinjau judul/deskripsi di dashboard)</label></div>
+              <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="cfgCleanup"><label class="form-check-label small" for="cfgCleanup">Hapus file segmen setelah upload sukses (hemat disk)</label></div>
+              <div class="row g-2 mb-2">
+                <div class="col-6"><label class="form-label small">Maks. retry</label><input id="cfgRetry" type="number" min="1" class="form-control form-control-sm"></div>
+                <div class="col-6 d-flex align-items-end">
+                  <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="cfgNotif"><label class="form-check-label small" for="cfgNotif">Notifikasi aktif</label></div>
+                </div>
+              </div>
+              <div class="d-flex gap-2 mb-2">
+                <button type="button" class="btn btn-outline-info btn-sm" onclick="testNotify()"><i class="bi bi-bell me-1"></i>Tes notifikasi</button>
+                <span class="small text-muted align-self-center" id="notifHint">Kanal diatur di .env (TELEGRAM_BOT_TOKEN/CHAT_ID, NOTIFY_WEBHOOK_URL)</span>
+              </div>
+
+              <button class="btn btn-success btn-sm w-100 fw-semibold mt-1"><i class="bi bi-save me-1"></i>Simpan ke config.json</button>
+              <div class="form-text mt-2">Worker memuat ulang otomatis. Kredensial (.env) tidak diubah dari sini.</div>
+              <button type="button" class="btn btn-outline-primary btn-sm w-100 mt-2" onclick="enqueueFromConfig()"><i class="bi bi-collection-play me-1"></i>Antrekan dari config</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kolom kanan -->
+    <div class="col-lg-8">
+      <div class="card p-3 shadow-sm mb-4">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+          <h5 class="fw-bold text-white mb-0"><i class="bi bi-collection-play me-2 text-info"></i>Antrean Video <span class="badge bg-secondary ms-1" id="jobCountBadge">0</span></h5>
+          <div class="d-flex flex-wrap gap-2 align-items-center">
+            <select id="filterStatus" class="form-select form-select-sm" style="width:auto" onchange="renderJobs()">
+              <option value="all">Semua</option>
+              <option value="active">Sedang diproses</option>
+              <option value="approval">Perlu persetujuan</option>
+              <option value="scheduled">Terjadwal</option>
+              <option value="done">Selesai</option>
+              <option value="failed">Gagal / batal</option>
+            </select>
+            <input id="searchBox" class="form-control form-control-sm" style="width:180px" placeholder="Cari niche/judul/ID" oninput="renderJobs()">
+            <div class="dropdown">
+              <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown"><i class="bi bi-lightning-charge me-1"></i>Aksi massal</button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li><a class="dropdown-item" href="#" onclick="bulk('approve_all'); return false;"><i class="bi bi-check2-all me-2"></i>Setujui semua yang menunggu</a></li>
+                <li><a class="dropdown-item" href="#" onclick="bulk('retry_failed'); return false;"><i class="bi bi-arrow-clockwise me-2"></i>Ulangi semua yang gagal</a></li>
+                <li><a class="dropdown-item" href="#" onclick="bulk('cancel_pending'); return false;"><i class="bi bi-x-circle me-2"></i>Batalkan semua yang belum upload</a></li>
+                <li><a class="dropdown-item" href="#" onclick="bulk('delete_finished'); return false;"><i class="bi bi-trash me-2"></i>Hapus semua selesai/gagal/batal (+file)</a></li>
+                <li><hr class="dropdown-divider border-secondary"></li>
+                <li><a class="dropdown-item" href="/api/export.csv"><i class="bi bi-filetype-csv me-2"></i>Export CSV</a></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="table-responsive" style="max-height: 560px;">
+          <table class="table table-dark table-hover table-sm align-middle mb-0">
+            <thead class="text-white">
+              <tr><th style="width:50px">ID</th><th>Niche &amp; ide</th><th>Status</th><th>Segmen</th><th>Jadwal upload</th><th>Hasil</th><th class="text-end">Aksi</th></tr>
+            </thead>
+            <tbody id="jobsTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Memuat antrean...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card p-3 shadow-sm">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span class="small fw-bold text-white"><i class="bi bi-terminal me-2 text-warning"></i>Log</span>
+          <div class="d-flex gap-2 align-items-center">
+            <select id="logSource" class="form-select form-select-sm" style="width:auto" onchange="fetchLogs()">
+              <option value="worker">worker.log</option><option value="dashboard">dashboard.log</option>
+            </select>
+            <button class="btn btn-sm btn-outline-secondary py-0" onclick="fetchLogs()"><i class="bi bi-arrow-repeat"></i></button>
+          </div>
+        </div>
+        <div class="terminal-box" id="logBox">Memuat log...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal detail job -->
+<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title fw-bold" id="modalJobTitle">Detail Job</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="modalJobBody"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  let cachedJobs = [];
+  let currentStatus = null;
+  let openJobId = null;
+  let modalDirty = false; // jangan timpa form modal yang sedang diedit saat polling
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('id-ID', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'}) : '-';
+  const pad2 = (n) => String(n).padStart(2, '0');
+  function toLocalInput(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function toast(message, type = 'info') {
+    const colors = { info: 'bg-primary', success: 'bg-success', warning: 'bg-warning text-dark', danger: 'bg-danger' };
+    const el = document.createElement('div');
+    el.className = `toast align-items-center text-white ${colors[type] || colors.info} border-0`;
+    el.innerHTML = `<div class="d-flex"><div class="toast-body">${esc(message)}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
+    document.getElementById('toastContainer').appendChild(el);
+    const t = new bootstrap.Toast(el, { delay: 4500 }); t.show();
+    el.addEventListener('hidden.bs.toast', () => el.remove());
+  }
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, options);
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) {
+      const detail = data && data.detail ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return data;
+  }
+  const postJson = (path, body) => api(path, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
+  const putJson = (path, body) => api(path, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
+
+  function statusInfo(status) {
+    if (status && status.startsWith('waiting_flow_segment_')) {
+      const n = status.split('_').pop();
+      return { label: `🎬 Menunggu Flow segmen ${n}`, cls: 'st-waiting' };
+    }
+    const map = {
+      queued: ['⏳ Antrean', 'st-queued'], planning: ['🧠 AI menyusun ide', 'st-planning'],
+      merging: ['⚙️ FFmpeg merge', 'st-merging'], metadata: ['📝 Metadata YouTube', 'st-metadata'],
+      awaiting_approval: ['🔎 Perlu persetujuan', 'st-approval'],
+      scheduled: ['⏰ Menunggu jadwal', 'st-scheduled'], uploading: ['🚀 Upload YouTube', 'st-uploading'],
+      done: ['✅ Selesai', 'st-done'], failed: ['❌ Gagal', 'st-failed'], cancelled: ['⛔ Dibatalkan', 'st-cancelled']
+    };
+    const [label, cls] = map[status] || [status, 'st-cancelled'];
+    return { label, cls };
+  }
+  const badge = (status) => { const i = statusInfo(status); return `<span class="badge badge-status ${i.cls}">${esc(i.label)}</span>`; };
+
+  function stepsHtml(job) {
+    const total = (job.plan && job.plan.segments ? job.plan.segments.length : (currentStatus?.config?.segments_per_video || 2));
+    const needsApproval = job.status === 'awaiting_approval' || job.failed_from_status === 'awaiting_approval' || (currentStatus?.config?.require_approval);
+    const steps = [['queued','Antrean'], ['planning','Ide & prompt']];
+    for (let i = 1; i <= total; i++) steps.push([`waiting_flow_segment_${i}`, `Flow seg ${i}`]);
+    steps.push(['merging','FFmpeg'], ['metadata','Metadata']);
+    if (needsApproval) steps.push(['awaiting_approval', 'Persetujuan']);
+    steps.push(['scheduled','Jadwal'], ['uploading','Upload'], ['done','Selesai']);
+    const current = (job.status === 'failed' || job.status === 'cancelled') ? job.failed_from_status : job.status;
+    let idx = steps.findIndex(s => s[0] === current); if (idx < 0) idx = 0;
+    return `<div class="steps">${steps.map((s, i) => {
+      let cls = i < idx ? 'done' : (i === idx ? ((job.status === 'failed' || job.status === 'cancelled') ? 'failed' : 'active') : '');
+      if (job.status === 'done') cls = 'done';
+      return `<div class="step ${cls}">${esc(s[1])}</div>`;
+    }).join('')}</div>`;
+  }
+
+  // ---------------- form buat video
+  function renderPresets(presets) {
+    const colors = ['info','danger','success','warning','primary','light','secondary'];
+    document.getElementById('presetButtons').innerHTML = (presets || []).map((p, i) =>
+      `<button type="button" class="btn btn-sm btn-outline-${colors[i % colors.length]} preset-btn" onclick="setNiche(this.dataset.niche)" data-niche="${esc(p)}">${esc(p)}</button>`).join('') || '<span class="small text-muted">Atur topik cepat di Pengaturan.</span>';
+  }
+  function setNiche(n) { document.getElementById('inputNiche').value = n; }
+  function toggleScheduleMode() {
+    const mode = document.getElementById('inputMode').value;
+    document.getElementById('intervalFields').classList.toggle('d-none', mode !== 'interval');
+    document.getElementById('specificFields').classList.toggle('d-none', mode !== 'specific_times');
+  }
+  function scheduleBody(withNiche) {
+    const mode = document.getElementById('inputMode').value;
+    const body = {
+      count: parseInt(document.getElementById('inputCount').value) || 1,
+      mode,
+      interval_hours: parseFloat(document.getElementById('inputInterval').value) || 3,
+      start_time: document.getElementById('inputStartTime').value || 'now',
+      specific_times: mode === 'specific_times' ? document.getElementById('inputTimes').value.split(',').map(s => s.trim()).filter(Boolean) : []
+    };
+    if (withNiche) body.niche = document.getElementById('inputNiche').value.trim();
+    return body;
+  }
+  async function previewSchedule() {
+    try {
+      const data = await postJson('/api/schedule/preview', scheduleBody(false));
+      const shown = data.times.slice(0, 6).map(fmtTime).join(' • ');
+      document.getElementById('schedulePreview').innerHTML = `<i class="bi bi-clock me-1"></i>Upload: ${esc(shown)}${data.times.length > 6 ? ` … (+${data.times.length - 6})` : ''} <span class="text-secondary">(waktu lokal browser)</span>`;
+    } catch (e) { toast('Preview gagal: ' + e.message, 'danger'); }
+  }
+  async function handleEnqueue(e) {
+    e.preventDefault();
+    const body = scheduleBody(true);
+    if (!body.niche) { toast('Niche tidak boleh kosong', 'warning'); return; }
+    try {
+      const data = await postJson('/api/enqueue', body);
+      toast(`${data.count} video ditambahkan ke antrean (job #${data.job_ids.join(', #')})`, 'success');
+      document.getElementById('inputNiche').value = '';
+      document.getElementById('schedulePreview').innerHTML = '';
+      refreshAll();
+    } catch (err) { toast('Gagal menambah antrean: ' + err.message, 'danger'); }
+  }
+  async function enqueueFromConfig() {
+    try {
+      const cfg = await api('/api/config');
+      const body = { niche: cfg.niche, count: cfg.total_videos, mode: cfg.schedule.mode, interval_hours: cfg.schedule.interval_hours, start_time: cfg.schedule.start_time, specific_times: cfg.schedule.specific_times };
+      if (!confirm(`Antrekan ${body.count} video untuk niche "${body.niche}"?`)) return;
+      const data = await postJson('/api/enqueue', body);
+      toast(`${data.count} video ditambahkan dari config.json`, 'success'); refreshAll();
+    } catch (err) { toast('Gagal: ' + err.message, 'danger'); }
+  }
+
+  // ---------------- pengaturan
+  async function loadConfigForm() {
+    try {
+      const c = await api('/api/config');
+      const set = (id, v) => { document.getElementById(id).value = v ?? ''; };
+      const chk = (id, v) => { document.getElementById(id).checked = !!v; };
+      set('cfgNiche', c.niche); set('cfgTotal', c.total_videos);
+      set('cfgSegments', c.segments_per_video); set('cfgSegDur', c.segment_duration_seconds);
+      set('cfgPresets', (c.niche_presets || []).join(', '));
+      set('cfgAiLang', c.ai.language); set('cfgAiStyle', c.ai.style_notes);
+      set('cfgMode', c.schedule.mode); set('cfgInterval', c.schedule.interval_hours);
+      set('cfgStart', c.schedule.start_time); set('cfgTz', c.schedule.timezone);
+      set('cfgTimes', (c.schedule.specific_times || []).join(', '));
+      set('cfgFlow', c.flow.provider === 'playwright' ? 'browser' : c.flow.provider);
+      set('cfgFit', c.video.fit_mode); set('cfgMusicMode', c.video.background_music_mode); set('cfgMusicVol', c.video.background_music_volume);
+      chk('cfgInbox', c.flow.inbox_auto_assign);
+      set('cfgPrivacy', c.youtube.privacy_status); set('cfgPlaylist', c.youtube.playlist_id);
+      chk('cfgApproval', c.youtube.require_approval); chk('cfgCleanup', c.maintenance.delete_segments_after_upload);
+      set('cfgRetry', c.retry.max_attempts); chk('cfgNotif', c.notifications.enabled);
+    } catch (e) { toast('Gagal memuat config: ' + e.message, 'danger'); }
+  }
+  async function saveConfig(e) {
+    e.preventDefault();
+    const val = (id) => document.getElementById(id).value;
+    const chk = (id) => document.getElementById(id).checked;
+    const update = {
+      niche: val('cfgNiche'), total_videos: parseInt(val('cfgTotal')),
+      segments_per_video: parseInt(val('cfgSegments')), segment_duration_seconds: parseInt(val('cfgSegDur')),
+      niche_presets: val('cfgPresets').split(',').map(s => s.trim()).filter(Boolean),
+      ai: { language: val('cfgAiLang') || 'id', style_notes: val('cfgAiStyle') },
+      schedule: { mode: val('cfgMode'), interval_hours: parseFloat(val('cfgInterval')), start_time: val('cfgStart'), timezone: val('cfgTz'),
+                  specific_times: val('cfgTimes').split(',').map(s => s.trim()).filter(Boolean) },
+      flow: { provider: val('cfgFlow'), inbox_auto_assign: chk('cfgInbox') },
+      video: { fit_mode: val('cfgFit'), background_music_mode: val('cfgMusicMode'), background_music_volume: parseFloat(val('cfgMusicVol')) },
+      youtube: { privacy_status: val('cfgPrivacy'), playlist_id: val('cfgPlaylist').trim(), require_approval: chk('cfgApproval') },
+      maintenance: { delete_segments_after_upload: chk('cfgCleanup') },
+      retry: { max_attempts: parseInt(val('cfgRetry')) },
+      notifications: { enabled: chk('cfgNotif') }
+    };
+    try {
+      await putJson('/api/config', update);
+      toast('config.json tersimpan. Worker memuat ulang otomatis.', 'success'); fetchStatus();
+    } catch (err) { toast('Config tidak valid: ' + err.message, 'danger'); }
+  }
+  async function testNotify() {
+    try {
+      const r = await postJson('/api/notify/test', {});
+      const detail = Object.entries(r.results).map(([k, v]) => `${k}: ${v}`).join(', ');
+      toast((r.success ? 'Notifikasi terkirim - ' : 'Sebagian gagal - ') + detail + (r.enabled_in_config ? '' : ' (notifications.enabled masih false)'), r.success ? 'success' : 'warning');
+    } catch (e) { toast(e.message, 'danger'); }
+  }
+
+  // ---------------- status & data
+  async function fetchStatus() {
+    try {
+      const s = await api('/api/status'); currentStatus = s;
+      document.getElementById('appVersion').innerText = 'v' + s.version;
+      const pill = document.getElementById('workerPill'); const w = s.worker;
+      if (w.online && w.paused) { pill.className = 'pill pill-pause'; pill.innerHTML = '<i class="bi bi-pause-circle me-1"></i>Worker: dijeda'; }
+      else if (w.online) { pill.className = 'pill pill-on'; pill.innerHTML = `<i class="bi bi-cpu me-1"></i>Worker: online${w.current_job ? ' • job #' + esc(w.current_job) : ''}`; }
+      else { pill.className = 'pill pill-off'; pill.innerHTML = '<i class="bi bi-cpu me-1"></i>Worker: offline'; }
+      const pb = document.getElementById('pauseBtn');
+      pb.innerHTML = w.paused ? '<i class="bi bi-play-fill me-1"></i>Lanjutkan' : '<i class="bi bi-pause-fill me-1"></i>Jeda';
+      pb.className = w.paused ? 'btn btn-outline-success btn-sm' : 'btn btn-outline-warning btn-sm';
+      const flow = w.flow_provider || s.config.flow_provider, ai = w.ai_provider || s.config.ai_provider;
+      const upload = w.upload_mode ? (w.upload_mode === 'mock' ? 'upload: SIMULASI' : 'upload: YouTube') : (s.config.mock_upload ? 'upload: SIMULASI' : 'upload: YouTube');
+      document.getElementById('providerBadge').innerText = `AI: ${ai} • Flow: ${flow} • ${upload} • ${s.config.privacy_status}${s.notifications.enabled ? ' • notif: ' + s.notifications.configured_channels.join('+') : ''}`;
+      const hints = { manual: 'manual: salin prompt, unggah hasil MP4 di detail job atau lewat folder inbox', browser: 'otomasi browser eksperimental + fallback manual', playwright: 'otomasi browser eksperimental + fallback manual', veo_api: 'Veo API resmi (berbayar) otomatis' };
+      document.getElementById('flowModeHint').innerText = hints[flow] || flow;
+      document.getElementById('approvalHint').innerText = s.config.require_approval ? 'menunggu persetujuan Anda di dashboard, lalu upload sesuai jadwal' : 'upload ke YouTube sesuai jadwal';
+      const inboxBadge = document.getElementById('inboxBadge');
+      if (s.inbox.enabled) {
+        inboxBadge.classList.remove('d-none');
+        inboxBadge.innerHTML = `<i class="bi bi-inbox me-1"></i>Inbox: ${s.inbox.pending_files} file`;
+        inboxBadge.title = 'Folder inbox: ' + s.inbox.dir;
+        const ih = document.getElementById('inboxHint'); ih.classList.remove('d-none');
+        ih.innerHTML = `<i class="bi bi-inbox me-1"></i>Tips: atur folder download browser ke <code>${esc(s.inbox.dir)}</code> - file hasil Flow otomatis dipasangkan ke job/segmen yang menunggu (urut).`;
+      } else { inboxBadge.classList.add('d-none'); document.getElementById('inboxHint').classList.add('d-none'); }
+      renderPresets(s.config.niche_presets);
+      const alert = document.getElementById('workerAlert'); const warns = [];
+      if (!w.online) warns.push('Worker belum berjalan: jalankan <code>python -m yshorts_bot run</code> (atau start.bat) supaya antrean diproses.');
+      if (!s.ffmpeg.available) warns.push('FFmpeg tidak ditemukan: install FFmpeg atau <code>pip install imageio-ffmpeg</code>.');
+      if (ai === 'mock') warns.push('AI_PROVIDER=mock (prompt contoh). Isi GEMINI_API_KEY / OPENAI_API_KEY di .env untuk ide & prompt asli.');
+      alert.innerHTML = warns.map(x => `<div><i class="bi bi-exclamation-triangle me-1"></i>${x}</div>`).join('');
+      alert.classList.toggle('d-none', warns.length === 0);
+    } catch (e) { console.error(e); }
+  }
+  async function togglePause() {
+    try {
+      const paused = currentStatus && currentStatus.worker.paused;
+      await postJson(paused ? '/api/worker/resume' : '/api/worker/pause');
+      toast(paused ? 'Worker dilanjutkan' : 'Worker dijeda (job tidak diproses sampai dilanjutkan)', 'info'); fetchStatus();
+    } catch (e) { toast(e.message, 'danger'); }
+  }
+
+  function matchesFilter(j) {
+    const f = document.getElementById('filterStatus').value;
+    const q = document.getElementById('searchBox').value.trim().toLowerCase();
+    const okF = f === 'all'
+      || (f === 'active' && !j.is_terminal && j.status !== 'awaiting_approval' && j.status !== 'scheduled')
+      || (f === 'approval' && j.status === 'awaiting_approval')
+      || (f === 'scheduled' && j.status === 'scheduled')
+      || (f === 'done' && j.status === 'done')
+      || (f === 'failed' && (j.status === 'failed' || j.status === 'cancelled'));
+    if (!okF) return false;
+    if (!q) return true;
+    const text = `#${j.id} ${j.niche} ${j.idea || ''} ${(j.metadata && j.metadata.title) || ''} ${j.status}`.toLowerCase();
+    return text.includes(q);
+  }
+
+  async function fetchData() {
+    try {
+      const [jobs, stats] = await Promise.all([api('/api/jobs'), api('/api/stats')]);
+      cachedJobs = jobs;
+      document.getElementById('stat-total').innerText = stats.total || 0;
+      document.getElementById('stat-queued').innerText = stats.queued || 0;
+      document.getElementById('stat-processing').innerText = stats.processing || 0;
+      document.getElementById('stat-approval').innerText = stats.awaiting_approval || 0;
+      document.getElementById('stat-scheduled').innerText = stats.scheduled || 0;
+      document.getElementById('stat-done').innerText = stats.done || 0;
+      document.getElementById('stat-failed').innerText = stats.failed_or_cancelled || 0;
+      renderJobs();
+      if (openJobId !== null) refreshOpenModal();
+    } catch (e) { console.error(e); }
+  }
+
+  // Render ulang modal hanya bila data job berubah dan pengguna tidak sedang memilih file / mengetik,
+  // supaya pilihan file & isian form tidak hilang karena polling.
+  let lastModalSig = null;
+  function refreshOpenModal() {
+    const job = cachedJobs.find(x => x.id === openJobId);
+    if (!job) { closeModal(); return; }
+    const body = document.getElementById('modalJobBody');
+    const hasFile = [...body.querySelectorAll('input[type=file]')].some(i => i.files && i.files.length);
+    const typing = body.contains(document.activeElement) && document.activeElement !== body;
+    const sig = JSON.stringify([job.status, job.segments_ready, job.output_exists, job.last_error, job.attempts, job.metadata, job.scheduled_upload_at, job.plan && job.plan.idea]);
+    if (modalDirty || hasFile || typing) return;
+    if (sig !== lastModalSig) { lastModalSig = sig; renderJobDetail(openJobId, false); }
+  }
+
+  function renderJobs() {
+    const jobs = cachedJobs.filter(matchesFilter);
+    document.getElementById('jobCountBadge').innerText = `${jobs.length}/${cachedJobs.length}`;
+    const tbody = document.getElementById('jobsTableBody');
+    if (!cachedJobs.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada video di antrean. Buat video pertama di panel kiri.</td></tr>'; return; }
+    if (!jobs.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Tidak ada job yang cocok dengan filter.</td></tr>'; return; }
+    tbody.innerHTML = jobs.map(j => {
+      const seg = (j.segments_ready || []).map((ok, i) => `<span class="badge ${ok ? 'bg-success' : 'bg-secondary'}" title="Segmen ${i + 1}">${i + 1}</span>`).join(' ');
+      let result = '<span class="text-muted small">-</span>';
+      if (j.youtube_video_id && !j.youtube_video_id.startsWith('demo_')) {
+        result = `<a href="https://youtube.com/shorts/${encodeURIComponent(j.youtube_video_id)}" target="_blank" class="btn btn-danger btn-action fw-bold"><i class="bi bi-youtube me-1"></i>Shorts</a>`;
+      } else if (j.output_exists) {
+        result = `<div class="btn-group btn-group-sm"><button class="btn btn-success btn-action" onclick="openJobDetail(${j.id})"><i class="bi bi-play-circle"></i></button><a href="/api/jobs/${j.id}/video" download="short_job_${j.id}.mp4" class="btn btn-outline-light btn-action" title="Unduh MP4"><i class="bi bi-download"></i></a></div>${j.youtube_video_id ? '<div><span class="badge bg-secondary mt-1" style="font-size:.62rem">upload simulasi</span></div>' : ''}`;
+      }
+      const waiting = j.status.startsWith('waiting_flow');
+      const titleLine = j.metadata && j.metadata.title ? `<div class="small text-muted text-truncate" style="max-width:320px" title="${esc(j.metadata.title)}"><i class="bi bi-card-heading me-1"></i>${esc(j.metadata.title)}</div>` : '';
+      return `<tr>
+        <td><strong>#${j.id}</strong></td>
+        <td><div class="fw-semibold">${esc(j.niche)}</div>${j.idea ? `<small class="text-info">${esc(j.idea)}</small>` : ''}${titleLine}${j.last_error && !j.is_terminal ? `<div class="small text-warning" title="${esc(j.last_error)}"><i class="bi bi-exclamation-circle"></i> retry ${j.attempts}/${j.max_attempts}</div>` : ''}</td>
+        <td>${badge(j.status)}</td>
+        <td class="text-nowrap">${seg}</td>
+        <td><small class="text-muted">${esc(fmtTime(j.scheduled_upload_at))}</small></td>
+        <td>${result}</td>
+        <td class="text-end text-nowrap">
+          ${j.status === 'awaiting_approval' ? `<button class="btn btn-sm fw-bold me-1" style="background:#f472b6;color:#000" onclick="approveJob(${j.id}, false)" title="Setujui, upload sesuai jadwal"><i class="bi bi-check2-circle"></i></button>` : ''}
+          ${waiting ? `<button class="btn btn-warning btn-action fw-bold me-1" onclick="openJobDetail(${j.id})" title="Unggah video Google Flow"><i class="bi bi-upload"></i></button>` : ''}
+          <button class="btn btn-outline-primary btn-action" onclick="openJobDetail(${j.id})"><i class="bi bi-eye"></i></button>
+          ${(j.status === 'failed' || j.status === 'cancelled') ? `<button class="btn btn-outline-warning btn-action ms-1" onclick="retryJob(${j.id})" title="Ulangi dari tahap gagal"><i class="bi bi-arrow-clockwise"></i></button>` : ''}
+          ${!j.is_terminal ? `<button class="btn btn-outline-danger btn-action ms-1" onclick="cancelJob(${j.id})" title="Batalkan"><i class="bi bi-x-circle"></i></button>` : ''}
+          ${j.is_terminal ? `<button class="btn btn-outline-secondary btn-action ms-1" onclick="deleteJob(${j.id})" title="Hapus"><i class="bi bi-trash"></i></button>` : ''}
+        </td></tr>`;
+    }).join('');
+  }
+
+  // ---------------- detail job
+  function openJobDetail(jobId) { openJobId = jobId; modalDirty = false; lastModalSig = null; renderJobDetail(jobId, true); }
+  function markDirty() { modalDirty = true; }
+  function renderJobDetail(jobId, show) {
+    const job = cachedJobs.find(x => x.id === jobId); if (!job) return;
+    document.getElementById('modalJobTitle').innerText = `Job #${job.id} • ${job.niche}`;
+    const waiting = job.status.startsWith('waiting_flow');
+    const canSim = waiting || job.status === 'queued' || job.status === 'planning';
+    const awaiting = job.status === 'awaiting_approval';
+    const canReschedule = !['uploading', 'done'].includes(job.status);
+    const canRegenPlan = !['uploading', 'done'].includes(job.status);
+    const canRegenMeta = canRegenPlan && !!job.output_path;
+    let body = `<div class="mb-3">${stepsHtml(job)}</div>
+      <div class="d-flex justify-content-between align-items-center mb-2"><span class="text-muted small">Status</span>${badge(job.status)}</div>
+      <div class="small text-muted mb-2">Dibuat ${esc(fmtTime(job.created_at))} • Jadwal upload ${esc(fmtTime(job.scheduled_upload_at))}${job.uploaded_at ? ' • Terupload ' + esc(fmtTime(job.uploaded_at)) : ''} • Percobaan ${job.attempts}/${job.max_attempts}</div>
+      ${job.last_error ? `<div class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>${esc(job.last_error)}</div>` : ''}
+      ${awaiting ? `<div class="alert py-2 small" style="background:#3b0a2a;border:1px solid #f472b6;color:#fbcfe8"><i class="bi bi-eye me-1"></i><strong>Perlu persetujuan.</strong> Periksa video & metadata di bawah, ubah bila perlu, lalu setujui.
+        <div class="mt-2 d-flex gap-2 flex-wrap"><button class="btn btn-sm fw-bold" style="background:#f472b6;color:#000" onclick="approveJob(${job.id}, false)"><i class="bi bi-check2-circle me-1"></i>Setujui (upload sesuai jadwal)</button>
+        <button class="btn btn-sm btn-outline-light" onclick="approveJob(${job.id}, true)"><i class="bi bi-rocket-takeoff me-1"></i>Setujui &amp; upload sekarang</button></div></div>` : ''}
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        ${canSim ? `<button class="btn btn-sm btn-warning fw-bold" onclick="simulateJob(${job.id})"><i class="bi bi-lightning-fill me-1"></i>Tes demo (klip uji FFmpeg)</button>` : ''}
+        ${(job.status === 'failed' || job.status === 'cancelled') ? `<button class="btn btn-sm btn-outline-warning" onclick="retryJob(${job.id})"><i class="bi bi-arrow-clockwise me-1"></i>Ulangi dari tahap gagal</button>` : ''}
+        ${canRegenPlan ? `<button class="btn btn-sm btn-outline-info" onclick="regenerate(${job.id}, 'plan')" title="Minta AI menyusun ide & prompt baru"><i class="bi bi-stars me-1"></i>Ide &amp; prompt baru</button>` : ''}
+        ${canRegenMeta ? `<button class="btn btn-sm btn-outline-info" onclick="regenerate(${job.id}, 'metadata')" title="Minta AI menyusun judul/deskripsi baru"><i class="bi bi-card-heading me-1"></i>Metadata baru</button>` : ''}
+        ${!job.is_terminal ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelJob(${job.id})"><i class="bi bi-x-circle me-1"></i>Batalkan</button>` : ''}
+        ${job.is_terminal ? `<button class="btn btn-sm btn-outline-secondary" onclick="deleteJob(${job.id})"><i class="bi bi-trash me-1"></i>Hapus job & file</button>` : ''}
+      </div>`;
+    if (canReschedule) {
+      body += `<div class="card p-2 bg-black border-secondary mb-3">
+        <div class="small fw-bold text-info mb-1"><i class="bi bi-calendar-event me-1"></i>Jadwal upload</div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <input type="datetime-local" id="sched_${job.id}" class="form-control form-control-sm" style="max-width:220px" value="${toLocalInput(job.scheduled_upload_at)}" oninput="markDirty()">
+          <button class="btn btn-sm btn-outline-light" onclick="saveSchedule(${job.id})"><i class="bi bi-save me-1"></i>Simpan jadwal</button>
+          ${job.status === 'scheduled' ? `<button class="btn btn-sm btn-outline-success" onclick="uploadNow(${job.id})"><i class="bi bi-rocket-takeoff me-1"></i>Upload sekarang</button>` : ''}
+          <span class="small text-muted">(waktu lokal browser)</span>
+        </div></div>`;
+    }
+    if (job.output_exists) {
+      body += `<div class="card p-3 bg-black border-success mb-3 text-center">
+        <h6 class="fw-bold text-success mb-2"><i class="bi bi-play-btn-fill me-1"></i>Video Shorts (9:16)</h6>
+        <div class="d-flex justify-content-center mb-2"><video controls width="220" style="max-height:380px;border-radius:8px;background:#000" src="/api/jobs/${job.id}/video?v=${encodeURIComponent(job.updated_at)}"></video></div>
+        <div class="d-flex justify-content-center gap-2 flex-wrap">
+          <a href="/api/jobs/${job.id}/video" download="short_job_${job.id}.mp4" class="btn btn-sm btn-success fw-bold"><i class="bi bi-download me-1"></i>Unduh MP4</a>
+          ${job.youtube_video_id && !job.youtube_video_id.startsWith('demo_') ? `<a href="https://youtube.com/shorts/${encodeURIComponent(job.youtube_video_id)}" target="_blank" class="btn btn-sm btn-danger fw-bold"><i class="bi bi-youtube me-1"></i>Buka di YouTube</a>` : (job.youtube_video_id ? '<span class="badge bg-secondary align-self-center py-2">Upload simulasi (YOUTUBE_MOCK_UPLOAD)</span>' : '')}
+        </div></div>`;
+    }
+    if (job.plan && job.plan.segments && job.plan.segments.length) {
+      body += `<div class="small text-muted mb-2"><strong class="text-white">Ide:</strong> ${esc(job.plan.idea)} &nbsp;|&nbsp; <strong class="text-white">Hook:</strong> ${esc(job.plan.hook)} &nbsp;|&nbsp; <strong class="text-white">Style:</strong> ${esc(job.plan.style)}</div>
+        <h6 class="fw-bold text-warning mb-2"><i class="bi bi-stars me-1"></i>Prompt Google Flow (segmen bersambung)</h6>`;
+      job.plan.segments.forEach((seg, i) => {
+        const ready = job.segments_ready && job.segments_ready[i];
+        const isCurrent = job.status === `waiting_flow_segment_${seg.index}`;
+        body += `<div class="card p-2 mb-3 bg-black ${isCurrent ? 'border-warning' : 'border-secondary'}" ondragover="event.preventDefault(); this.classList.add('border-info')" ondragleave="this.classList.remove('border-info')" ondrop="dropSegment(event, ${job.id}, ${seg.index})">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <span><span class="badge bg-primary">Segmen ${seg.index} • ${seg.duration_seconds || 8}s</span> ${ready ? '<span class="badge bg-success ms-1"><i class="bi bi-check2"></i> video ada</span>' : (isCurrent ? '<span class="badge bg-warning text-dark ms-1">menunggu video - seret & lepas MP4 ke sini</span>' : '')}</span>
+            <button class="btn btn-sm btn-outline-info py-0" onclick="copyPrompt(${job.id}, ${i})"><i class="bi bi-clipboard me-1"></i>Salin prompt</button>
+          </div>
+          <p class="prompt-text text-white mb-2">${esc(seg.prompt)}</p>
+          <div class="border-top border-secondary pt-2 d-flex flex-wrap gap-2 align-items-center">
+            <div class="input-group input-group-sm" style="max-width:420px">
+              <input type="file" id="file_seg_${job.id}_${seg.index}" accept="video/mp4,video/quicktime,video/webm,video/*" class="form-control form-control-sm" onchange="markDirty()">
+              <button class="btn btn-outline-success" onclick="uploadSegmentFile(${job.id}, ${seg.index})" ${job.is_terminal ? 'disabled' : ''}><i class="bi bi-upload me-1"></i>Kirim video</button>
+            </div>
+            ${ready ? `<a class="btn btn-sm btn-outline-light" target="_blank" href="/api/jobs/${job.id}/segments/${seg.index}"><i class="bi bi-play me-1"></i>Lihat segmen</a>` : ''}
+          </div></div>`;
+      });
+      body += `<div class="small text-muted mb-3">Atau simpan file manual ke <code>data/flow_downloads/job_${job.id}_segment_&lt;n&gt;.mp4</code>${currentStatus?.inbox?.enabled ? ', atau letakkan apa adanya di folder inbox' : ''}. Prompt juga tersimpan di <code>data/prompts/</code>.</div>`;
+    } else if (!job.is_terminal) {
+      body += `<div class="p-3 text-center text-muted small"><i class="bi bi-hourglass-split me-1"></i>Prompt AI sedang disiapkan oleh worker...</div>`;
+    }
+    if (job.metadata) {
+      const m = job.metadata;
+      if (job.metadata_editable) {
+        body += `<h6 class="fw-bold text-info mt-2 mb-2"><i class="bi bi-youtube me-1"></i>Metadata YouTube <span class="badge bg-secondary">bisa diedit</span></h6>
+          <div class="card p-2 bg-black border-secondary small">
+            <label class="form-label small mb-0">Judul (maks 100)</label>
+            <input id="meta_title_${job.id}" class="form-control form-control-sm mb-2" maxlength="100" value="${esc(m.title)}" oninput="markDirty()">
+            <label class="form-label small mb-0">Deskripsi</label>
+            <textarea id="meta_desc_${job.id}" class="form-control form-control-sm mb-2" rows="4" oninput="markDirty()">${esc(m.description)}</textarea>
+            <div class="row g-2">
+              <div class="col-6"><label class="form-label small mb-0">Hashtag</label><input id="meta_hash_${job.id}" class="form-control form-control-sm" value="${esc((m.hashtags || []).join(' '))}" oninput="markDirty()"></div>
+              <div class="col-6"><label class="form-label small mb-0">Tags (koma)</label><input id="meta_tags_${job.id}" class="form-control form-control-sm" value="${esc((m.tags || []).join(', '))}" oninput="markDirty()"></div>
+            </div>
+            <div class="mt-2"><button class="btn btn-sm btn-outline-success" onclick="saveMetadata(${job.id})"><i class="bi bi-save me-1"></i>Simpan metadata</button></div>
+          </div>`;
+      } else {
+        body += `<h6 class="fw-bold text-info mt-2 mb-2"><i class="bi bi-youtube me-1"></i>Metadata YouTube</h6>
+          <div class="card p-2 bg-black border-secondary small">
+            <div><strong>Judul:</strong> ${esc(m.title)}</div>
+            <div class="mt-1"><strong>Deskripsi:</strong> <span class="prompt-text">${esc(m.description)}</span></div>
+            <div class="mt-1"><strong>Hashtag:</strong> ${esc((m.hashtags || []).join(' '))}</div>
+            <div class="mt-1"><strong>Tags:</strong> ${esc((m.tags || []).join(', '))}</div>
+          </div>`;
+      }
+    }
+    document.getElementById('modalJobBody').innerHTML = body;
+    if (show) {
+      const modalEl = document.getElementById('jobModal');
+      const modal = bootstrap.Modal.getOrCreateInstance(modalEl); modal.show();
+      modalEl.addEventListener('hidden.bs.modal', () => { openJobId = null; modalDirty = false; }, { once: true });
+    }
+  }
+  function closeModal() { const m = bootstrap.Modal.getInstance(document.getElementById('jobModal')); if (m) m.hide(); }
+
+  async function copyPrompt(jobId, idx) {
+    const job = cachedJobs.find(x => x.id === jobId); if (!job) return;
+    const text = job.plan.segments[idx].prompt;
+    try { await navigator.clipboard.writeText(text); toast('Prompt disalin. Tempel di Google Flow.', 'success'); }
+    catch (e) { window.prompt('Salin prompt berikut:', text); }
+  }
+  async function simulateJob(jobId) {
+    try { const data = await postJson(`/api/jobs/${jobId}/simulate`); toast(data.message, 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast('Simulasi gagal: ' + e.message, 'danger'); }
+  }
+  async function uploadSegmentFile(jobId, segIndex, droppedFile = null) {
+    const input = document.getElementById(`file_seg_${jobId}_${segIndex}`);
+    const file = droppedFile || (input && input.files && input.files[0]);
+    if (!file) { toast('Pilih file video terlebih dahulu.', 'warning'); return; }
+    const fd = new FormData(); fd.append('segment_index', segIndex); fd.append('file', file);
+    toast(`Mengunggah segmen ${segIndex}...`, 'info');
+    try {
+      const data = await api(`/api/jobs/${jobId}/upload-segment`, { method: 'POST', body: fd });
+      toast(`Segmen ${segIndex} tersimpan (${data.duration.toFixed(1)}s, ${data.width}x${data.height}). Worker melanjutkan otomatis.`, 'success');
+      modalDirty = false; lastModalSig = null; fetchData();
+    } catch (e) { toast('Gagal mengunggah: ' + e.message, 'danger'); }
+  }
+  function dropSegment(event, jobId, segIndex) {
+    event.preventDefault();
+    event.currentTarget.classList.remove('border-info');
+    const files = event.dataTransfer && event.dataTransfer.files;
+    if (!files || !files.length) return;
+    uploadSegmentFile(jobId, segIndex, files[0]);
+  }
+  async function approveJob(id, uploadNow) {
+    try { const r = await postJson(`/api/jobs/${id}/approve`, { upload_now: uploadNow }); toast(`Job #${id} disetujui - upload ${uploadNow ? 'sekarang' : fmtTime(r.scheduled_upload_at)}`, 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function saveSchedule(id) {
+    const v = document.getElementById(`sched_${id}`).value;
+    if (!v) { toast('Isi tanggal & jam terlebih dahulu.', 'warning'); return; }
+    try { const r = await postJson(`/api/jobs/${id}/schedule`, { scheduled_upload_at: new Date(v).toISOString() }); toast(`Jadwal job #${id}: ${fmtTime(r.scheduled_upload_at)}`, 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function uploadNow(id) {
+    if (!confirm(`Upload job #${id} sekarang (abaikan jadwal)?`)) return;
+    try { await postJson(`/api/jobs/${id}/schedule`, { scheduled_upload_at: 'now' }); toast(`Job #${id} akan diupload segera`, 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function saveMetadata(id) {
+    const body = {
+      title: document.getElementById(`meta_title_${id}`).value,
+      description: document.getElementById(`meta_desc_${id}`).value,
+      hashtags: document.getElementById(`meta_hash_${id}`).value,
+      tags: document.getElementById(`meta_tags_${id}`).value
+    };
+    try { await putJson(`/api/jobs/${id}/metadata`, body); toast('Metadata tersimpan', 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function regenerate(id, target) {
+    let purge = false;
+    if (target === 'plan') {
+      if (!confirm(`Minta AI menyusun ide & prompt BARU untuk job #${id}? Job kembali ke awal antrean.`)) return;
+      purge = confirm('Hapus juga file video segmen yang sudah ada? (OK = hapus, Cancel = pertahankan)');
+    } else if (!confirm(`Minta AI menyusun judul/deskripsi baru untuk job #${id}?`)) return;
+    try { const r = await postJson(`/api/jobs/${id}/regenerate`, { target, purge_segments: purge }); toast(`Job #${id} -> ${r.status}`, 'success'); modalDirty = false; fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function retryJob(id) { try { await postJson(`/api/jobs/${id}/retry`); toast(`Job #${id} diulang`, 'success'); modalDirty = false; fetchData(); } catch (e) { toast(e.message, 'danger'); } }
+  async function cancelJob(id) { if (!confirm(`Batalkan job #${id}?`)) return; try { await postJson(`/api/jobs/${id}/cancel`); toast(`Job #${id} dibatalkan`, 'warning'); modalDirty = false; fetchData(); } catch (e) { toast(e.message, 'danger'); } }
+  async function deleteJob(id) {
+    if (!confirm(`Hapus job #${id} dari daftar?`)) return;
+    const purge = confirm('Hapus juga file-nya (prompt, segmen, video output)?\n\nOK = hapus file, Cancel = pertahankan file di folder data/');
+    try { await api(`/api/jobs/${id}?purge=${purge}`, { method: 'DELETE' }); toast(`Job #${id} dihapus${purge ? ' beserta file' : ''}`, 'info'); closeModal(); fetchData(); } catch (e) { toast(e.message, 'danger'); }
+  }
+  async function bulk(action) {
+    const labels = { approve_all: 'Setujui semua job yang menunggu persetujuan?', retry_failed: 'Ulangi semua job yang gagal?', cancel_pending: 'Batalkan SEMUA job yang belum diupload?', delete_finished: 'Hapus semua job selesai/gagal/batal beserta filenya?' };
+    if (!confirm(labels[action])) return;
+    try { const r = await postJson('/api/jobs/bulk', { action, purge: true }); toast(`${r.count} job diproses (${action})`, 'success'); fetchData(); }
+    catch (e) { toast(e.message, 'danger'); }
+  }
+  async function fetchLogs() {
+    try {
+      const src = document.getElementById('logSource').value;
+      const r = await fetch(`/api/logs?source=${src}&lines=200`); const text = await r.text();
+      const el = document.getElementById('logBox'); const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      el.innerText = text; if (atBottom) el.scrollTop = el.scrollHeight;
+    } catch (e) {}
+  }
+  function refreshAll() { fetchStatus(); fetchData(); fetchLogs(); }
+
+  refreshAll();
+  setInterval(fetchData, 4000);
+  setInterval(fetchStatus, 6000);
+  setInterval(fetchLogs, 5000);
+</script>
+</body>
+</html>

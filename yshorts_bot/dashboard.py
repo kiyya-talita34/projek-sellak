@@ -1,663 +1,612 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
+import logging
 import os
-import shutil
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, Field, ValidationError
 
-from .config import load_config
-from .db.queue import QueueDB
-from .scheduler.schedule import build_upload_schedule
+from . import __version__
+from .ai.planner import build_metadata
+from .config import AppConfig, ScheduleConfig, env_flag, load_config, save_config
+from .db.queue import METADATA_EDITABLE_STATUSES, TERMINAL_STATUSES, QueueDB, is_waiting_status, utcnow
+from .flow.prompt_files import (
+    candidate_video_paths,
+    expected_video_path,
+    find_ready_video,
+    is_video_file,
+    job_files,
+    prompt_path,
+)
+from .models import VideoPlan
+from .notify import Notifier
+from .scheduler.schedule import build_upload_schedule, resolve_timezone, to_utc_iso
+from .video.ffmpeg import AUDIO_EXTENSIONS, FFmpegError, make_test_clip, probe, resolve_ffmpeg
+from .worker import worker_online
+
+log = logging.getLogger(__name__)
+
+TEMPLATE_PATH = Path(__file__).parent / "templates" / "dashboard.html"
+SIMULATABLE_STATUSES = {"queued", "planning"}
+REGENERATE_PLAN_BLOCKED = {"uploading", "done"}
 
 
-class EnqueueRequest(BaseModel):
-    niche: str
-    count: int = 1
-    mode: str = "interval"
-    interval_hours: int = 3
+# ---------------------------------------------------------------------------
+# Model permintaan
+# ---------------------------------------------------------------------------
+class ScheduleRequest(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    mode: Literal["interval", "specific_times"] = "interval"
+    interval_hours: float = Field(default=3, gt=0, le=744)
     start_time: str = "08:00"
+    specific_times: list[str] = Field(default_factory=list)
 
 
+class EnqueueRequest(ScheduleRequest):
+    niche: str = Field(min_length=1, max_length=200)
+
+
+class MetadataUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    hashtags: list[str] | str | None = None
+    tags: list[str] | str | None = None
+
+
+class ApproveRequest(BaseModel):
+    upload_now: bool = False
+
+
+class RescheduleRequest(BaseModel):
+    scheduled_upload_at: str = Field(min_length=1, description="ISO 8601, 'YYYY-MM-DDTHH:MM' (zona config), atau 'now'")
+
+
+class RegenerateRequest(BaseModel):
+    target: Literal["plan", "metadata"] = "metadata"
+    purge_segments: bool = False
+
+
+class BulkRequest(BaseModel):
+    action: Literal["retry_failed", "approve_all", "cancel_pending", "delete_finished"]
+    purge: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Util
+# ---------------------------------------------------------------------------
+def _deep_merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _validation_message(error: ValidationError) -> str:
+    parts = []
+    for err in error.errors():
+        loc = ".".join(str(x) for x in err.get("loc", ()))
+        parts.append(f"{loc}: {err.get('msg')}" if loc else str(err.get("msg")))
+    return "; ".join(parts) or "Data tidak valid"
+
+
+def _schedule_from_request(base: ScheduleConfig, req: ScheduleRequest) -> ScheduleConfig:
+    data = base.model_dump()
+    data.update({"mode": req.mode, "interval_hours": req.interval_hours, "start_time": req.start_time})
+    if req.specific_times:
+        data["specific_times"] = req.specific_times
+    try:
+        return ScheduleConfig(**data)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=_validation_message(e)) from e
+
+
+def parse_schedule_input(value: str, tz_name: str) -> str:
+    """'now' | ISO 8601 (dengan/tanpa zona) | 'YYYY-MM-DDTHH:MM' (dianggap zona config) -> ISO UTC."""
+    raw = (value or "").strip()
+    if not raw or raw.lower() in ("now", "sekarang"):
+        return utcnow()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Format waktu tidak valid. Gunakan YYYY-MM-DDTHH:MM atau 'now'.") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=resolve_timezone(tz_name))
+    return to_utc_iso(dt)
+
+
+def _basic_auth_dependency():
+    """Aktif bila DASHBOARD_USERNAME dan DASHBOARD_PASSWORD diset di .env (disarankan bila --host bukan 127.0.0.1)."""
+    username = os.getenv("DASHBOARD_USERNAME", "")
+    password = os.getenv("DASHBOARD_PASSWORD", "")
+    if not (username and password):
+        return None
+    security = HTTPBasic(realm="YShorts Bot Studio")
+
+    def verify(credentials: HTTPBasicCredentials = Depends(security)) -> None:
+        ok_user = secrets.compare_digest(credentials.username.encode("utf-8"), username.encode("utf-8"))
+        ok_pass = secrets.compare_digest(credentials.password.encode("utf-8"), password.encode("utf-8"))
+        if not (ok_user and ok_pass):
+            raise HTTPException(status_code=401, detail="Login dashboard salah.", headers={"WWW-Authenticate": "Basic"})
+
+    return verify
+
+
+# ---------------------------------------------------------------------------
+# Aplikasi
+# ---------------------------------------------------------------------------
 def create_app(config_path: str = "config.json") -> FastAPI:
-    cfg = load_config(config_path)
-    db = QueueDB(cfg.paths.db_path)
+    state: dict[str, Any] = {"cfg": load_config(config_path)}
+
+    def cfg() -> AppConfig:
+        return state["cfg"]
+
+    db = QueueDB(cfg().paths.db_path)
     db.init()
-    app = FastAPI(title="YShorts Bot Studio")
+    app = FastAPI(title="YShorts Bot Studio", version=__version__)
+    verify = _basic_auth_dependency()
+    router = APIRouter(dependencies=[Depends(verify)] if verify else [])
+    auth_enabled = verify is not None
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        return DASHBOARD_HTML
+    @app.middleware("http")
+    async def same_origin_guard(request: Request, call_next):  # noqa: ANN001
+        """Tolak permintaan yang mengubah data dari situs lain (CSRF): halaman web asing di browser
+        yang sama tidak boleh bisa membatalkan job/menjeda worker di dashboard lokal."""
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            site = request.headers.get("sec-fetch-site")
+            if site and site not in ("same-origin", "none"):
+                return JSONResponse({"detail": "Permintaan lintas situs ditolak."}, status_code=403)
+            origin = request.headers.get("origin") or request.headers.get("referer")
+            if origin:
+                host = (request.headers.get("host") or "").lower()
+                if urlsplit(origin).netloc.lower() != host:
+                    return JSONResponse({"detail": "Permintaan lintas situs ditolak."}, status_code=403)
+        return await call_next(request)
 
-    @app.get("/api/jobs")
-    def list_jobs(limit: int = 100):
-        jobs = db.list_jobs(limit)
-        parsed = []
-        for j in jobs:
-            item = dict(j)
-            item["plan"] = json.loads(item["plan_json"]) if item.get("plan_json") else None
-            item["metadata"] = json.loads(item["metadata_json"]) if item.get("metadata_json") else None
-            item["segment_paths"] = json.loads(item["segment_paths_json"]) if item.get("segment_paths_json") else []
-            parsed.append(item)
-        return parsed
+    # ------------------------------------------------------------------ helpers
+    def _load_json(raw: str | None, default: Any) -> Any:
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return default
 
-    @app.get("/api/stats")
-    def get_stats():
+    def _existing_download_names() -> set[str]:
+        base = Path(cfg().paths.flow_download_dir)
+        if not base.is_dir():
+            return set()
+        return {p.name for p in base.iterdir() if p.is_file()}
+
+    def _segment_exists(job_id: int, index: int, names: set[str], recorded: str | None) -> bool:
+        if recorded and Path(recorded).exists():
+            return True
+        base = Path(cfg().paths.flow_download_dir)
+        for p in candidate_video_paths(base, job_id, index):
+            if p.parent == base:
+                if p.name in names:
+                    return True
+            elif p.is_file():
+                return True
+        return False
+
+    def _serialize_job(job: dict[str, Any], names: set[str] | None = None) -> dict[str, Any]:
+        names = _existing_download_names() if names is None else names
+        item = dict(job)
+        plan = _load_json(item.get("plan_json"), None)
+        item["plan"] = plan
+        item["metadata"] = _load_json(item.get("metadata_json"), None)
+        item["segment_paths"] = _load_json(item.get("segment_paths_json"), [])
+        segments = (plan or {}).get("segments") or []
+        expected = len(segments) or cfg().segments_per_video
+        item["segments_ready"] = [
+            _segment_exists(item["id"], i, names, item["segment_paths"][i - 1] if i - 1 < len(item["segment_paths"]) else None)
+            for i in range(1, expected + 1)
+        ]
+        item["output_exists"] = bool(item.get("output_path") and Path(item["output_path"]).exists())
+        item["is_terminal"] = item["status"] in TERMINAL_STATUSES
+        item["metadata_editable"] = item["status"] in METADATA_EDITABLE_STATUSES and bool(item["metadata"])
+        return item
+
+    def _get_job_or_404(job_id: int) -> dict[str, Any]:
+        job = db.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
+        return job
+
+    def _job_segment_count(job: dict[str, Any]) -> int:
+        plan = _load_json(job.get("plan_json"), {}) or {}
+        return len(plan.get("segments") or []) or cfg().segments_per_video
+
+    def _remove_job_files(job: dict[str, Any], include_output: bool, include_prompts: bool = True) -> list[str]:
+        removed: list[str] = []
+        paths = job_files(cfg().paths.prompt_dir, cfg().paths.flow_download_dir, job["id"], _job_segment_count(job))
+        if include_output and job.get("output_path"):
+            paths.append(Path(job["output_path"]))
+        for p in paths:
+            if not include_prompts and p.suffix.lower() == ".txt":
+                continue
+            try:
+                if p.is_file():
+                    p.unlink()
+                    removed.append(str(p))
+            except OSError as e:
+                log.warning("Tidak bisa menghapus %s: %s", p, e)
+        return removed
+
+    def _inbox_pending() -> int:
+        base = Path(cfg().flow.inbox_dir)
+        if not base.is_dir():
+            return 0
+        return sum(1 for p in base.iterdir() if is_video_file(p))
+
+    def _music_files() -> int:
+        base = Path(cfg().video.background_music_dir or "")
+        if not cfg().video.background_music_dir or not base.is_dir():
+            return 0
+        return sum(1 for p in base.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS)
+
+    # ------------------------------------------------------------------ publik (tanpa auth)
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        return {"ok": True, "version": __version__, "worker_online": worker_online(db.all_meta()), "time": utcnow()}
+
+    # ------------------------------------------------------------------ halaman
+    @router.get("/", response_class=HTMLResponse)
+    def index() -> str:
+        return TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    # ------------------------------------------------------------------ jobs & stats
+    @router.get("/api/jobs")
+    def list_jobs(limit: int = Query(default=200, ge=1, le=2000)) -> list[dict[str, Any]]:
+        names = _existing_download_names()
+        return [_serialize_job(j, names) for j in db.list_jobs(limit)]
+
+    @router.get("/api/jobs/{job_id}")
+    def get_job(job_id: int) -> dict[str, Any]:
+        return _serialize_job(_get_job_or_404(job_id))
+
+    @router.get("/api/stats")
+    def get_stats() -> dict[str, int]:
         return db.get_stats()
 
-    @app.post("/api/enqueue")
-    def enqueue(req: EnqueueRequest):
-        if not req.niche.strip():
-            raise HTTPException(status_code=400, detail="Niche tidak boleh kosong.")
-        
-        sched_cfg = cfg.schedule.model_copy()
-        sched_cfg.mode = req.mode  # type: ignore
-        sched_cfg.interval_hours = req.interval_hours
-        sched_cfg.start_time = req.start_time
-
-        times = build_upload_schedule(sched_cfg, req.count)
-        job_ids = db.enqueue(req.niche.strip(), req.count, cfg.retry.max_attempts, times)
-        return {"success": True, "job_ids": job_ids, "count": len(job_ids)}
-
-    @app.post("/api/jobs/{job_id}/retry")
-    def retry_job(job_id: int):
-        ok = db.retry_job(job_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
-        return {"success": True}
-
-    @app.post("/api/jobs/{job_id}/cancel")
-    def cancel_job(job_id: int):
-        ok = db.cancel_job(job_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan atau sudah selesai.")
-        return {"success": True}
-
-    @app.delete("/api/jobs/{job_id}")
-    def delete_job(job_id: int):
-        ok = db.delete_job(job_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
-        return {"success": True}
-
-    @app.post("/api/jobs/{job_id}/upload-segment")
-    async def upload_segment(
-        job_id: int,
-        segment_index: int = Form(...),
-        file: UploadFile = File(...)
-    ):
-        job = db.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
-        
-        dest_dir = Path(cfg.paths.flow_download_dir)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / f"job_{job_id}_segment_{segment_index}.mp4"
-
-        with open(dest_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        return {"success": True, "saved_path": str(dest_path), "size_bytes": dest_path.stat().st_size}
-
-    @app.post("/api/jobs/{job_id}/simulate")
-    def simulate_job(job_id: int):
-        import subprocess
-        job = db.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
-        dest_dir = Path(cfg.paths.flow_download_dir)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for seg_idx in (1, 2):
-            dest_path = dest_dir / f"job_{job_id}_segment_{seg_idx}.mp4"
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "lavfi", "-i", "testsrc=size=720x1280:rate=30",
-                "-t", "8",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                str(dest_path)
-            ]
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return {"success": True, "message": "Video sampel untuk Segmen 1 & 2 berhasil dibuat! Worker akan langsung menggabungkan dengan FFmpeg."}
-
-
-    @app.get("/api/logs", response_class=PlainTextResponse)
-    def logs():
-        path = Path(cfg.paths.log_dir) / "yshorts.log"
-        if not path.exists():
-            return "Log file belum terbentuk."
+    @router.get("/api/status")
+    def get_status() -> dict[str, Any]:
+        meta = db.all_meta()
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-            lines = content.splitlines()[-150:]
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error membaca log: {e}"
+            ffmpeg_path: str | None = resolve_ffmpeg(cfg().video)
+        except FileNotFoundError:
+            ffmpeg_path = None
+        notifier = Notifier(cfg().notifications)
+        return {
+            "version": __version__,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+            "auth_enabled": auth_enabled,
+            "worker": {
+                "online": worker_online(meta),
+                "paused": meta.get("worker_paused") == "1",
+                "last_heartbeat": meta.get("worker_heartbeat"),
+                "stopped_at": meta.get("worker_stopped_at"),
+                "pid": meta.get("worker_pid"),
+                "current_job": meta.get("worker_current_job") or None,
+                "ai_provider": meta.get("worker_ai_provider"),
+                "flow_provider": meta.get("worker_flow_provider"),
+                "upload_mode": meta.get("worker_upload_mode"),
+                "version": meta.get("worker_version"),
+            },
+            "config": {
+                "flow_provider": cfg().flow.provider,
+                "ai_provider": os.getenv("AI_PROVIDER", "mock").lower(),
+                "mock_upload": env_flag("YOUTUBE_MOCK_UPLOAD", False),
+                "timezone": cfg().schedule.timezone,
+                "segments_per_video": cfg().segments_per_video,
+                "segment_duration_seconds": cfg().segment_duration_seconds,
+                "privacy_status": cfg().youtube.privacy_status,
+                "require_approval": cfg().youtube.require_approval,
+                "niche_presets": cfg().niche_presets,
+            },
+            "inbox": {
+                "enabled": cfg().flow.inbox_auto_assign,
+                "dir": str(Path(cfg().flow.inbox_dir).resolve()),
+                "pending_files": _inbox_pending(),
+            },
+            "music": {"mode": cfg().video.background_music_mode, "dir": cfg().video.background_music_dir, "files": _music_files()},
+            "notifications": {"enabled": notifier.enabled, "configured_channels": notifier.channels},
+            "ffmpeg": {"available": ffmpeg_path is not None, "path": ffmpeg_path},
+        }
 
-    @app.get("/api/jobs/{job_id}/video")
-    def get_job_video(job_id: int):
+    # ------------------------------------------------------------------ enqueue & jadwal
+    @router.post("/api/schedule/preview")
+    def schedule_preview(req: ScheduleRequest) -> dict[str, Any]:
+        sched = _schedule_from_request(cfg().schedule, req)
+        try:
+            times = build_upload_schedule(sched, req.count)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"times": times, "timezone": sched.timezone}
+
+    @router.post("/api/enqueue")
+    def enqueue(req: EnqueueRequest) -> dict[str, Any]:
+        niche = req.niche.strip()
+        if not niche:
+            raise HTTPException(status_code=400, detail="Niche tidak boleh kosong.")
+        sched = _schedule_from_request(cfg().schedule, req)
+        try:
+            times = build_upload_schedule(sched, req.count)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        job_ids = db.enqueue(niche, req.count, cfg().retry.max_attempts, times)
+        log.info("Dashboard: %s job baru untuk niche '%s' -> %s", len(job_ids), niche, job_ids)
+        return {"success": True, "job_ids": job_ids, "count": len(job_ids), "scheduled_times": times}
+
+    # ------------------------------------------------------------------ aksi job
+    @router.post("/api/jobs/{job_id}/retry")
+    def retry_job(job_id: int) -> dict[str, Any]:
+        _get_job_or_404(job_id)
+        db.retry_job(job_id)
+        return {"success": True, "status": db.get(job_id)["status"]}
+
+    @router.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: int) -> dict[str, Any]:
+        _get_job_or_404(job_id)
+        if not db.cancel_job(job_id):
+            raise HTTPException(status_code=409, detail="Job sudah selesai atau sudah dibatalkan.")
+        return {"success": True}
+
+    @router.post("/api/jobs/{job_id}/approve")
+    def approve_job(job_id: int, req: ApproveRequest | None = None) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        if job["status"] != "awaiting_approval":
+            raise HTTPException(status_code=409, detail=f"Job berstatus '{job['status']}', bukan menunggu persetujuan.")
+        db.approve_job(job_id, upload_now=bool(req and req.upload_now))
         job = db.get(job_id)
-        if not job or not job.get("output_path"):
+        return {"success": True, "status": job["status"], "scheduled_upload_at": job["scheduled_upload_at"]}
+
+    @router.post("/api/jobs/{job_id}/schedule")
+    def reschedule_job(job_id: int, req: RescheduleRequest) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        if job["status"] in ("uploading", "done"):
+            raise HTTPException(status_code=409, detail="Job sedang/sudah diupload, jadwal tidak bisa diubah.")
+        when = parse_schedule_input(req.scheduled_upload_at, cfg().schedule.timezone)
+        db.reschedule_job(job_id, when)
+        return {"success": True, "scheduled_upload_at": when, "status": db.get(job_id)["status"]}
+
+    @router.put("/api/jobs/{job_id}/metadata")
+    def update_metadata(job_id: int, req: MetadataUpdate) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        if job["status"] == "uploading" or job["status"] == "done":
+            raise HTTPException(status_code=409, detail="Metadata tidak bisa diubah saat/setelah upload.")
+        current = _load_json(job.get("metadata_json"), {}) or {}
+        if not current and job["status"] not in METADATA_EDITABLE_STATUSES:
+            raise HTTPException(status_code=409, detail="Metadata belum dibuat oleh worker.")
+        plan = VideoPlan.from_dict(_load_json(job.get("plan_json"), {}) or {})
+        merged = dict(current)
+        for key, value in req.model_dump(exclude_none=True).items():
+            merged[key] = value
+        meta = build_metadata(merged, plan.idea or job["niche"], plan.hook or job["niche"], job["niche"])
+        db.update(job_id, metadata_json=meta.to_dict())
+        return {"success": True, "metadata": meta.to_dict()}
+
+    @router.post("/api/jobs/{job_id}/regenerate")
+    def regenerate_job(job_id: int, req: RegenerateRequest) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        if job["status"] in REGENERATE_PLAN_BLOCKED:
+            raise HTTPException(status_code=409, detail="Job sedang/sudah diupload.")
+        if req.target == "plan":
+            removed = _remove_job_files(job, include_output=False, include_prompts=False) if req.purge_segments else []
+            db.update(
+                job_id, status="queued", next_run_at=utcnow(), attempts=0, last_error=None, failed_from_status=None,
+                flow_waiting_since=None, segment_paths_json=[], metadata_json=None, output_path=None,
+            )
+            return {"success": True, "status": "queued", "removed_files": removed}
+        if not job.get("output_path"):
+            raise HTTPException(status_code=409, detail="Video belum digabung; metadata dibuat setelah tahap merge.")
+        db.update(job_id, status="metadata", next_run_at=utcnow(), attempts=0, last_error=None, failed_from_status=None)
+        return {"success": True, "status": "metadata", "removed_files": []}
+
+    @router.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: int, purge: bool = Query(default=False)) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        removed = _remove_job_files(job, include_output=True) if purge else []
+        db.delete_job(job_id)
+        return {"success": True, "removed_files": removed}
+
+    @router.post("/api/jobs/bulk")
+    def bulk_action(req: BulkRequest) -> dict[str, Any]:
+        if req.action == "retry_failed":
+            ids = db.bulk_retry_failed()
+        elif req.action == "approve_all":
+            ids = db.bulk_approve()
+        elif req.action == "cancel_pending":
+            ids = db.bulk_cancel_pending()
+        else:  # delete_finished
+            ids = []
+            for job in db.list_by_status(TERMINAL_STATUSES):
+                if req.purge:
+                    _remove_job_files(job, include_output=True)
+                db.delete_job(job["id"])
+                ids.append(job["id"])
+        log.info("Dashboard: aksi massal %s -> %s job", req.action, len(ids))
+        return {"success": True, "action": req.action, "job_ids": ids, "count": len(ids)}
+
+    @router.post("/api/jobs/{job_id}/upload-segment")
+    def upload_segment(job_id: int, segment_index: int = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        expected = _job_segment_count(job)
+        if not 1 <= segment_index <= expected:
+            raise HTTPException(status_code=400, detail=f"segment_index harus 1..{expected}.")
+        dest = expected_video_path(cfg().paths.flow_download_dir, job_id, segment_index)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        size = 0
+        with open(tmp, "wb") as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+        try:
+            info = probe(tmp, resolve_ffmpeg(cfg().video))
+            if not info.has_video:
+                raise FFmpegError("tidak ada stream video")
+        except (FFmpegError, FileNotFoundError) as e:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"File bukan video yang valid: {e}") from e
+        os.replace(tmp, dest)  # rename atomik: worker tidak akan membaca file setengah jadi
+        if is_waiting_status(job["status"]):
+            db.update(job_id, next_run_at=utcnow())  # proses segera
+        log.info("Dashboard: segmen %s job #%s diunggah (%s bytes, %.1fs)", segment_index, job_id, size, info.duration)
+        return {"success": True, "saved_path": str(dest), "size_bytes": size, "duration": info.duration,
+                "width": info.width, "height": info.height}
+
+    @router.post("/api/jobs/{job_id}/simulate")
+    def simulate_job(job_id: int) -> dict[str, Any]:
+        job = _get_job_or_404(job_id)
+        if not (job["status"] in SIMULATABLE_STATUSES or is_waiting_status(job["status"])):
+            raise HTTPException(status_code=409, detail=f"Job berstatus '{job['status']}' tidak bisa disimulasikan.")
+        plan = _load_json(job.get("plan_json"), {}) or {}
+        segments = plan.get("segments") or []
+        count = len(segments) or cfg().segments_per_video
+        try:
+            ffmpeg = resolve_ffmpeg(cfg().video)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        created: list[str] = []
+        for i in range(1, count + 1):
+            if find_ready_video(cfg().paths.flow_download_dir, job_id, i, stable_seconds=0):
+                continue
+            seconds = (segments[i - 1].get("duration_seconds") if i - 1 < len(segments) else None) or cfg().segment_duration_seconds
+            dest = expected_video_path(cfg().paths.flow_download_dir, job_id, i)
+            try:
+                make_test_clip(dest, seconds=float(seconds), hue_shift=(i - 1) * 90, with_audio=(i % 2 == 0), ffmpeg=ffmpeg)
+            except FFmpegError as e:
+                raise HTTPException(status_code=500, detail=f"FFmpeg gagal membuat klip uji: {e}") from e
+            created.append(str(dest))
+        if is_waiting_status(job["status"]):
+            db.update(job_id, next_run_at=utcnow())
+        return {
+            "success": True,
+            "created": created,
+            "message": f"{len(created)} klip uji dibuat untuk {count} segmen. Worker akan menggabungkannya dengan FFmpeg.",
+        }
+
+    # ------------------------------------------------------------------ file
+    @router.get("/api/jobs/{job_id}/video")
+    def get_job_video(job_id: int) -> FileResponse:
+        job = _get_job_or_404(job_id)
+        if not job.get("output_path"):
             raise HTTPException(status_code=404, detail="Video belum tersedia.")
         path = Path(job["output_path"])
         if not path.exists():
             raise HTTPException(status_code=404, detail="File video tidak ditemukan di disk.")
         return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
+    @router.get("/api/jobs/{job_id}/segments/{index}")
+    def get_job_segment(job_id: int, index: int) -> FileResponse:
+        _get_job_or_404(job_id)
+        for candidate in candidate_video_paths(cfg().paths.flow_download_dir, job_id, index):
+            if candidate.is_file():
+                return FileResponse(str(candidate), media_type="video/mp4", filename=candidate.name)
+        raise HTTPException(status_code=404, detail="Segmen belum tersedia.")
+
+    @router.get("/api/jobs/{job_id}/prompt/{index}", response_class=PlainTextResponse)
+    def get_job_prompt(job_id: int, index: int) -> str:
+        _get_job_or_404(job_id)
+        path = prompt_path(cfg().paths.prompt_dir, job_id, index)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="File prompt belum ada.")
+        return path.read_text(encoding="utf-8")
+
+    @router.get("/api/export.csv")
+    def export_csv() -> Response:
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "id", "status", "niche", "idea", "title", "youtube_url", "scheduled_upload_at", "uploaded_at",
+            "created_at", "attempts", "output_path", "last_error",
+        ])
+        for job in reversed(db.list_jobs(100000)):
+            meta = _load_json(job.get("metadata_json"), {}) or {}
+            vid = job.get("youtube_video_id") or ""
+            url = f"https://youtube.com/shorts/{vid}" if vid and not vid.startswith("demo_") else ""
+            writer.writerow([
+                job["id"], job["status"], job["niche"], job.get("idea") or "", meta.get("title", ""), url,
+                job.get("scheduled_upload_at") or "", job.get("uploaded_at") or "", job.get("created_at") or "",
+                job.get("attempts"), job.get("output_path") or "", (job.get("last_error") or "")[:500],
+            ])
+        filename = f"yshorts_jobs_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        return Response(
+            content="﻿" + buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/api/logs", response_class=PlainTextResponse)
+    def logs(source: Literal["worker", "dashboard", "cli"] = "worker", lines: int = Query(default=200, ge=10, le=5000)) -> str:
+        path = Path(cfg().paths.log_dir) / f"{source}.log"
+        if not path.exists():
+            return f"Log '{source}' belum terbentuk. Jalankan worker: python -m yshorts_bot run"
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return "\n".join(content[-lines:])
+        except OSError as e:
+            return f"Error membaca log: {e}"
+
+    # ------------------------------------------------------------------ config, notifikasi & kontrol worker
+    @router.get("/api/config")
+    def get_config() -> dict[str, Any]:
+        data = cfg().model_dump()
+        data["_config_path"] = str(Path(config_path).resolve())
+        return data
+
+    @router.put("/api/config")
+    def put_config(update: dict[str, Any]) -> dict[str, Any]:
+        update.pop("_config_path", None)
+        if "paths" in update:
+            raise HTTPException(status_code=400, detail="paths.* hanya bisa diubah lewat file config.json (butuh restart).")
+        if isinstance(update.get("video"), dict) and "ffmpeg_binary" in update["video"]:
+            raise HTTPException(status_code=400, detail="video.ffmpeg_binary hanya bisa diubah lewat file config.json.")
+        merged = _deep_merge(cfg().model_dump(), update)
+        try:
+            new_cfg = AppConfig(**merged)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=_validation_message(e)) from e
+        save_config(new_cfg, config_path)
+        state["cfg"] = new_cfg
+        log.info("Dashboard: config.json diperbarui (%s)", ", ".join(update.keys()))
+        return {"success": True, "config": new_cfg.model_dump(),
+                "note": "Worker memuat ulang config otomatis (kecuali paths.*, butuh restart)."}
+
+    @router.post("/api/notify/test")
+    def notify_test() -> dict[str, Any]:
+        notifier = Notifier(cfg().notifications)
+        if not notifier.channels:
+            raise HTTPException(status_code=400, detail="Belum ada kanal: isi TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID atau NOTIFY_WEBHOOK_URL di .env (lalu restart dashboard).")
+        results = notifier.send_sync("[YShorts] Tes notifikasi dari dashboard berhasil.", {"event": "test"})
+        return {"success": all(v == "ok" for v in results.values()), "results": results, "enabled_in_config": cfg().notifications.enabled}
+
+    @router.post("/api/worker/pause")
+    def pause_worker() -> dict[str, Any]:
+        db.set_meta("worker_paused", "1")
+        return {"success": True, "paused": True}
+
+    @router.post("/api/worker/resume")
+    def resume_worker() -> dict[str, Any]:
+        db.set_meta("worker_paused", "0")
+        return {"success": True, "paused": False}
+
+    app.include_router(router)
     return app
-
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YShorts Bot - Studio Otomasi YouTube Shorts</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <style>
-    :root {
-      --bg-dark: #0f172a;
-      --card-dark: #1e293b;
-      --border-dark: #334155;
-      --accent: #6366f1;
-      --text-muted: #94a3b8;
-    }
-    body {
-      background-color: var(--bg-dark);
-      color: #f8fafc;
-      font-family: system-ui, -apple-system, sans-serif;
-    }
-    .card {
-      background-color: var(--card-dark);
-      border: 1px solid var(--border-dark);
-      border-radius: 12px;
-    }
-    .stat-card {
-      padding: 1rem;
-      border-radius: 10px;
-      text-align: center;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid var(--border-dark);
-    }
-    .stat-val { font-size: 1.8rem; font-weight: 700; }
-    .badge-status { font-size: 0.8rem; padding: 0.35rem 0.65rem; border-radius: 20px; }
-    .status-queued { background-color: #3b82f6; }
-    .status-planning { background-color: #8b5cf6; }
-    .status-waiting_flow_segment_1 { background-color: #f59e0b; }
-    .status-waiting_flow_segment_2 { background-color: #f97316; }
-    .status-merging { background-color: #eab308; color: #000; }
-    .status-metadata { background-color: #a855f7; }
-    .status-scheduled { background-color: #06b6d4; }
-    .status-uploading { background-color: #0ea5e9; }
-    .status-done { background-color: #10b981; }
-    .status-failed { background-color: #ef4444; }
-    .preset-btn {
-      font-size: 0.8rem;
-      margin-right: 0.4rem;
-      margin-bottom: 0.4rem;
-      border-radius: 20px;
-    }
-    .terminal-box {
-      background: #000;
-      color: #38bdf8;
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 0.8rem;
-      height: 250px;
-      overflow-y: auto;
-      padding: 12px;
-      border-radius: 8px;
-    }
-    .btn-action { padding: 0.2rem 0.5rem; font-size: 0.8rem; }
-  </style>
-</head>
-<body class="p-3 p-md-4">
-<div class="container-fluid max-w-7xl">
-
-  <!-- Header -->
-  <div class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
-    <div>
-      <h2 class="fw-bold mb-0 text-white"><i class="bi bi-youtube text-danger me-2"></i>YShorts Bot Studio</h2>
-      <p class="text-muted small mb-0">Otomasi Konten YouTube Shorts AI &bull; Google Flow Ultra &bull; FFmpeg &bull; YouTube API</p>
-    </div>
-    <div class="d-flex align-items-center gap-2">
-      <span class="badge bg-primary text-light px-2 py-1"><i class="bi bi-browser-chrome me-1"></i>Otomasi Browser Aktif</span>
-      <button class="btn btn-outline-info btn-sm" onclick="fetchData()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
-      <a href="/docs" target="_blank" class="btn btn-outline-light btn-sm"><i class="bi bi-code-slash me-1"></i>Swagger API</a>
-    </div>
-  </div>
-
-  <!-- Stat Bar -->
-  <div class="row g-3 mb-4" id="statsBar">
-    <div class="col-6 col-md-2">
-      <div class="stat-card">
-        <div class="text-muted small">Total Video</div>
-        <div class="stat-val text-white" id="stat-total">0</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-2">
-      <div class="stat-card">
-        <div class="text-muted small">Antrean</div>
-        <div class="stat-val text-primary" id="stat-queued">0</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-3">
-      <div class="stat-card">
-        <div class="text-muted small">Sedang Diproses / Flow</div>
-        <div class="stat-val text-warning" id="stat-processing">0</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-2">
-      <div class="stat-card">
-        <div class="text-muted small">Terupload</div>
-        <div class="stat-val text-success" id="stat-done">0</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-3">
-      <div class="stat-card">
-        <div class="text-muted small">Gagal / Dibatalkan</div>
-        <div class="stat-val text-danger" id="stat-failed">0</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="row g-4">
-    <!-- Form Tambah Antrean -->
-    <div class="col-lg-4">
-      <div class="card p-3 shadow-sm h-100">
-        <h5 class="fw-bold text-white mb-3"><i class="bi bi-plus-circle me-2 text-primary"></i>Buat Video Baru</h5>
-        
-        <div class="mb-3">
-          <label class="form-label small text-light fw-semibold"><i class="bi bi-magic me-1 text-warning"></i>Pilih Topik Cepat:</label>
-          <div>
-            <button class="btn btn-sm btn-outline-info preset-btn" onclick="setNiche('Fakta unik dunia')">🌍 Fakta Unik</button>
-            <button class="btn btn-sm btn-outline-danger preset-btn" onclick="setNiche('Cerita horor misteri')">👻 Kisah Horor</button>
-            <button class="btn btn-sm btn-outline-success preset-btn" onclick="setNiche('Fakta menarik tentang hewan')">🐾 Fakta Hewan</button>
-            <button class="btn btn-sm btn-outline-warning preset-btn" onclick="setNiche('Motivasi & pola pikir sukses')">💡 Motivasi</button>
-            <button class="btn btn-sm btn-outline-primary preset-btn" onclick="setNiche('Misteri sejarah kuno')">🏛️ Sejarah</button>
-            <button class="btn btn-sm btn-outline-light preset-btn" onclick="setNiche('Perkembangan teknologi AI masa depan')">🤖 Teknologi AI</button>
-          </div>
-        </div>
-
-        <form id="enqueueForm" onsubmit="handleEnqueue(event)">
-          <div class="mb-3">
-            <label class="form-label small fw-semibold text-light">Niche / Topik Utama:</label>
-            <input type="text" id="inputNiche" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="Contoh: Fakta mengejutkan laut dalam" required>
-          </div>
-
-          <div class="row g-2 mb-3">
-            <div class="col-6">
-              <label class="form-label small fw-semibold text-light">Jumlah Video:</label>
-              <input type="number" id="inputCount" class="form-control form-control-sm bg-dark text-white border-secondary" value="1" min="1" max="20" required>
-            </div>
-            <div class="col-6">
-              <label class="form-label small fw-semibold text-light">Interval Upload:</label>
-              <select id="inputInterval" class="form-select form-select-sm bg-dark text-white border-secondary">
-                <option value="1">Setiap 1 jam</option>
-                <option value="3" selected>Setiap 3 jam</option>
-                <option value="6">Setiap 6 jam</option>
-                <option value="12">Setiap 12 jam</option>
-                <option value="24">1 video / hari</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="mb-3">
-            <label class="form-label small fw-semibold text-light">Jam Mulai Upload Pertama:</label>
-            <input type="time" id="inputStartTime" class="form-control form-control-sm bg-dark text-white border-secondary" value="08:00">
-          </div>
-
-
-          <button type="submit" class="btn btn-primary w-100 btn-sm fw-semibold py-2">
-            <i class="bi bi-send-fill me-1"></i> Tambah ke Antrean
-          </button>
-        </form>
-
-        <div class="mt-4 pt-3 border-top border-secondary">
-          <h6 class="small fw-bold text-muted mb-2"><i class="bi bi-info-circle me-1"></i>Alur Kerja Otomatis:</h6>
-          <ol class="small text-muted ps-3 mb-0">
-            <li>AI menciptakan ide dan 2 prompt Google Flow bersambung.</li>
-            <li>Browser Chrome otomatis memasukkan prompt ke Google Flow & mengunduh video.</li>
-            <li>FFmpeg otomatis menggabungkan segmen menjadi Shorts 9:16 &ge; 16 detik.</li>
-            <li>Otomatis upload & publish ke channel YouTube sesuai jadwal.</li>
-          </ol>
-        </div>
-      </div>
-    </div>
-
-    <!-- Antrean & Pekerjaan -->
-    <div class="col-lg-8">
-      <div class="card p-3 shadow-sm mb-4">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-          <h5 class="fw-bold text-white mb-0"><i class="bi bi-collection-play me-2 text-info"></i>Daftar Antrean Video</h5>
-          <span class="badge bg-secondary" id="jobCountBadge">0 Jobs</span>
-        </div>
-
-        <div class="table-responsive" style="max-height: 480px;">
-          <table class="table table-dark table-hover table-sm align-middle mb-0">
-            <thead class="table-secondary text-white">
-              <tr>
-                <th style="width: 50px;">ID</th>
-                <th>Niche & Ide</th>
-                <th>Status</th>
-                <th>Jadwal Upload</th>
-                <th>Hasil / Link</th>
-                <th class="text-end">Aksi</th>
-              </tr>
-            </thead>
-            <tbody id="jobsTableBody">
-              <tr><td colspan="6" class="text-center text-muted py-4">Memuat data antrean...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Live Terminal Log -->
-      <div class="card p-3 shadow-sm">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-          <span class="small fw-bold text-white"><i class="bi bi-terminal me-2 text-warning"></i>Live Worker Activity Log</span>
-          <button class="btn btn-sm btn-outline-secondary py-0" onclick="fetchLogs()"><i class="bi bi-arrow-repeat"></i></button>
-        </div>
-        <div class="terminal-box" id="logBox">Memuat log sistem...</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Modal Detail Job & Google Flow Prompter -->
-<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-centered">
-    <div class="modal-content bg-dark text-white border-secondary">
-      <div class="modal-header border-secondary">
-        <h5 class="modal-title fw-bold" id="modalJobTitle">Detail Job #</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body" id="modalJobBody">
-        <!-- Dynamic content -->
-      </div>
-    </div>
-  </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-  let cachedJobs = [];
-
-  function setNiche(n) {
-    document.getElementById('inputNiche').value = n;
-  }
-
-  function getStatusBadge(status) {
-    const labels = {
-      'queued': '⏳ Antrean',
-      'planning': '🧠 AI Planning',
-      'waiting_flow_segment_1': '🎬 Google Flow Segmen 1',
-      'waiting_flow_segment_2': '🎬 Google Flow Segmen 2',
-      'merging': '⚙️ FFmpeg Merging',
-      'metadata': '📝 YouTube Metadata',
-      'scheduled': '⏰ Menunggu Jadwal',
-      'uploading': '🚀 Mengunggah ke YouTube',
-      'done': '✅ Selesai & Live',
-      'failed': '❌ Gagal'
-    };
-    const cls = 'status-' + status;
-    return `<span class="badge badge-status ${cls}">${labels[status] || status}</span>`;
-  }
-
-  async function fetchData() {
-    try {
-      const [rJobs, rStats] = await Promise.all([fetch('/api/jobs'), fetch('/api/stats')]);
-      const jobs = await rJobs.json();
-      const stats = await rStats.json();
-      cachedJobs = jobs;
-
-      document.getElementById('stat-total').innerText = stats.total || 0;
-      document.getElementById('stat-queued').innerText = stats.queued || 0;
-      const proc = (stats.planning||0) + (stats.waiting_flow_segment_1||0) + (stats.waiting_flow_segment_2||0) + (stats.merging||0) + (stats.metadata||0) + (stats.uploading||0);
-      document.getElementById('stat-processing').innerText = proc;
-      document.getElementById('stat-done').innerText = stats.done || 0;
-      document.getElementById('stat-failed').innerText = stats.failed || 0;
-      document.getElementById('jobCountBadge').innerText = `${jobs.length} Jobs`;
-
-      const tbody = document.getElementById('jobsTableBody');
-      if (jobs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada video di antrean. Buat video pertama Anda pada panel di sebelah kiri!</td></tr>';
-        return;
-      }
-
-      let html = '';
-      for (const j of jobs) {
-        const ideaText = j.idea ? `<br><small class="text-info">${j.idea}</small>` : '';
-        let ytLink = '<span class="text-muted small">-</span>';
-        if (j.output_path) {
-          if (j.youtube_video_id && !j.youtube_video_id.startsWith('demo_')) {
-            ytLink = `<a href="https://youtube.com/shorts/${j.youtube_video_id}" target="_blank" class="btn btn-danger btn-action fw-bold"><i class="bi bi-youtube me-1"></i>Shorts</a>`;
-          } else {
-            ytLink = `
-              <div class="d-inline-flex flex-column align-items-start">
-                <div class="btn-group btn-group-sm">
-                  <button class="btn btn-success btn-action fw-semibold" onclick="openJobDetail(${j.id})"><i class="bi bi-play-circle me-1"></i>Putar</button>
-                  <a href="/api/jobs/${j.id}/video" download="short_job_${j.id}.mp4" class="btn btn-outline-light btn-action" title="Unduh MP4"><i class="bi bi-download"></i></a>
-                </div>
-                <span class="badge bg-secondary text-light mt-1" style="font-size:0.65rem;">Lokal (Simulasi)</span>
-              </div>
-            `;
-          }
-        }
-        
-        const scheduleDisplay = j.scheduled_upload_at 
-          ? new Date(j.scheduled_upload_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
-          : '-';
-
-        html += `
-          <tr>
-            <td><strong class="text-white">#${j.id}</strong></td>
-            <td>
-              <div class="fw-semibold">${j.niche}</div>
-              ${ideaText}
-            </td>
-            <td>${getStatusBadge(j.status)}</td>
-            <td><small class="text-muted">${scheduleDisplay}</small></td>
-            <td>${ytLink}</td>
-            <td class="text-end text-nowrap">
-              ${(j.status.startsWith('waiting_flow') || j.status === 'queued') ? `<button class="btn btn-warning btn-sm me-1 fw-bold shadow-sm" onclick="simulateJob(${j.id})"><i class="bi bi-lightning-fill"></i> Tes Demo</button>` : ''}
-              <button class="btn btn-outline-primary btn-action" onclick="openJobDetail(${j.id})"><i class="bi bi-eye"></i> Detail</button>
-              ${j.status === 'failed' ? `<button class="btn btn-outline-warning btn-action ms-1" onclick="retryJob(${j.id})"><i class="bi bi-arrow-clockwise"></i></button>` : ''}
-              ${j.status !== 'done' && j.status !== 'failed' ? `<button class="btn btn-outline-danger btn-action ms-1" onclick="cancelJob(${j.id})"><i class="bi bi-x-circle"></i></button>` : ''}
-            </td>
-          </tr>
-        `;
-      }
-      tbody.innerHTML = html;
-    } catch(e) {
-      console.error(e);
-    }
-  }
-
-  function openJobDetail(jobId) {
-    const job = cachedJobs.find(x => x.id === jobId);
-    if (!job) return;
-
-    document.getElementById('modalJobTitle').innerText = `Job #${job.id} \u2022 ${job.niche}`;
-    const canSimulate = !['done','uploading','merging','metadata','scheduled'].includes(job.status);
-    let body = `
-      ${canSimulate ? `
-      <div class="alert alert-warning py-2 d-flex justify-content-between align-items-center mb-3">
-        <span class="small">&#x1F9EA; <strong>Belum punya video Google Flow?</strong> Klik tombol ini untuk tes pipeline lengkap secara otomatis!</span>
-        <button id="simBtn_${job.id}" class="btn btn-sm btn-dark ms-2 fw-bold" onclick="simulateJob(${job.id})">
-          &#x26A1; Tes Demo Otomatis
-        </button>
-      </div>` : ''}
-      <div class="mb-3">
-        <div class="d-flex justify-content-between align-items-center mb-1">
-          <span class="text-muted small">Status Pekerjaan:</span>
-          ${getStatusBadge(job.status)}
-        </div>
-        ${job.last_error ? `<div class="alert alert-danger py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>${job.last_error}</div>` : ''}
-      </div>
-      ${job.output_path ? `
-      <div class="card p-3 bg-black border-success mb-3 text-center">
-        <h6 class="fw-bold text-success mb-2"><i class="bi bi-play-btn-fill me-1"></i>Video Shorts Siap Tayang (1080×1920 Vertikal)</h6>
-        <div class="d-flex justify-content-center mb-2">
-          <video controls width="220" style="max-height: 380px; border-radius: 8px; background: #000; box-shadow: 0 4px 14px rgba(0,0,0,0.6);" src="/api/jobs/${job.id}/video"></video>
-        </div>
-        <div class="d-flex justify-content-center gap-2 mt-2 flex-wrap">
-          <a href="/api/jobs/${job.id}/video" download="short_job_${job.id}.mp4" class="btn btn-sm btn-success fw-bold"><i class="bi bi-download me-1"></i>Unduh Berkas MP4</a>
-          ${job.youtube_video_id && !job.youtube_video_id.startsWith('demo_') 
-            ? `<a href="https://youtube.com/shorts/${job.youtube_video_id}" target="_blank" class="btn btn-sm btn-danger fw-bold"><i class="bi bi-youtube me-1"></i>Buka di YouTube</a>`
-            : `<span class="badge bg-secondary align-self-center py-2"><i class="bi bi-info-circle me-1"></i>Mode Simulasi (Tersimpan di Penyimpanan Lokal)</span>`
-          }
-        </div>
-      </div>` : ''}
-    `;
-
-    if (job.plan && job.plan.segments) {
-      body += `<h6 class="fw-bold text-warning mb-2"><i class="bi bi-stars me-1"></i>Prompt Google Flow Ultra (Kontinuitas Segmen)</h6>`;
-      for (const seg of job.plan.segments) {
-        body += `
-          <div class="card p-2 mb-3 bg-black border-secondary">
-            <div class="d-flex justify-content-between align-items-center mb-1">
-              <span class="badge bg-primary">Segmen ${seg.index} &bull; ${seg.duration_seconds || 8} detik</span>
-              <button class="btn btn-sm btn-outline-info py-0" onclick="copyPrompt('${encodeURIComponent(seg.prompt)}')"><i class="bi bi-clipboard me-1"></i>Salin Prompt</button>
-            </div>
-            <p class="small text-white mb-2" style="white-space: pre-wrap;">${seg.prompt}</p>
-            
-            <div class="border-top border-secondary pt-2 mt-1">
-              <div class="small text-muted mb-1"><i class="bi bi-upload me-1"></i>Upload Video Segmen ${seg.index} (Hasil Google Flow):</div>
-              <div class="input-group input-group-sm">
-                <input type="file" id="file_seg_${job.id}_${seg.index}" accept="video/mp4" class="form-control form-control-sm bg-dark text-white border-secondary">
-                <button class="btn btn-outline-success" onclick="uploadSegmentFile(${job.id}, ${seg.index})">Kirim Video</button>
-              </div>
-            </div>
-          </div>
-        `;
-      }
-    } else {
-      body += `<div class="p-3 text-center text-muted small"><i class="bi bi-hourglass-split me-1"></i>Prompt AI sedang disiapkan oleh worker...</div>`;
-    }
-
-    if (job.metadata) {
-      body += `
-        <h6 class="fw-bold text-info mt-3 mb-2"><i class="bi bi-youtube me-1"></i>Metadata YouTube Shorts</h6>
-        <div class="card p-2 bg-black border-secondary small">
-          <div><strong>Judul:</strong> ${job.metadata.title}</div>
-          <div class="mt-1"><strong>Deskripsi:</strong> ${job.metadata.description}</div>
-          <div class="mt-1"><strong>Hashtags:</strong> ${(job.metadata.hashtags||[]).join(' ')}</div>
-        </div>
-      `;
-    }
-
-    document.getElementById('modalJobBody').innerHTML = body;
-    new bootstrap.Modal(document.getElementById('jobModal')).show();
-  }
-
-  function copyPrompt(encoded) {
-    const text = decodeURIComponent(encoded);
-    navigator.clipboard.writeText(text).then(() => {
-      alert("Prompt berhasil disalin ke clipboard! Paste langsung ke Google Flow Ultra.");
-    });
-  }
-
-  async function simulateJob(jobId) {
-    const btn = document.getElementById('simBtn_' + jobId);
-    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Membuat video...'; }
-    try {
-      const res = await fetch(`/api/jobs/${jobId}/simulate`, {method: 'POST'});
-      const data = await res.json();
-      if (res.ok) {
-        alert('✅ ' + data.message);
-        fetchData();
-        const modal = bootstrap.Modal.getInstance(document.getElementById('jobModal'));
-        if (modal) modal.hide();
-      } else {
-        alert('❌ Gagal: ' + (data.detail || 'Error tidak diketahui'));
-      }
-    } catch(e) {
-      alert('❌ Error: ' + e.message);
-    }
-    if (btn) { btn.disabled = false; btn.innerHTML = '&#x26A1; Tes Demo Otomatis'; }
-  }
-
-  async function uploadSegmentFile(jobId, segIndex) {
-    const input = document.getElementById(`file_seg_${jobId}_${segIndex}`);
-    if (!input.files || input.files.length === 0) {
-      alert("Silakan pilih file MP4 terlebih dahulu.");
-      return;
-    }
-    const formData = new FormData();
-    formData.append("segment_index", segIndex);
-    formData.append("file", input.files[0]);
-
-    try {
-      const res = await fetch(`/api/jobs/${jobId}/upload-segment`, {
-        method: "POST",
-        body: formData
-      });
-      const data = await res.json();
-      if (res.ok) {
-        alert(`Video segmen ${segIndex} berhasil diunggah! Worker akan melanjutkan proses.`);
-        fetchData();
-        bootstrap.Modal.getInstance(document.getElementById('jobModal')).hide();
-      } else {
-        alert("Gagal mengunggah: " + (data.detail || "Error tidak diketahui"));
-      }
-    } catch(e) {
-      alert("Error: " + e.message);
-    }
-  }
-
-  async function handleEnqueue(e) {
-    e.preventDefault();
-    const niche = document.getElementById('inputNiche').value;
-    const count = parseInt(document.getElementById('inputCount').value);
-    const interval_hours = parseInt(document.getElementById('inputInterval').value);
-    const start_time = document.getElementById('inputStartTime').value;
-
-    const res = await fetch('/api/enqueue', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ niche, count, interval_hours, start_time })
-    });
-
-    if (res.ok) {
-      document.getElementById('inputNiche').value = '';
-      fetchData();
-      alert(`Berhasil menambahkan ${count} video ke antrean!`);
-    } else {
-      alert('Gagal menambahkan job ke antrean.');
-    }
-  }
-
-  async function retryJob(id) {
-    await fetch(`/api/jobs/${id}/retry`, {method: 'POST'});
-    fetchData();
-  }
-
-  async function cancelJob(id) {
-    if (confirm(`Yakin ingin membatalkan Job #${id}?`)) {
-      await fetch(`/api/jobs/${id}/cancel`, {method: 'POST'});
-      fetchData();
-    }
-  }
-
-  async function fetchLogs() {
-    try {
-      const r = await fetch('/api/logs');
-      const text = await r.text();
-      const el = document.getElementById('logBox');
-      el.innerText = text;
-      el.scrollTop = el.scrollHeight;
-    } catch(e) {}
-  }
-
-  fetchData();
-  fetchLogs();
-  setInterval(fetchData, 4000);
-  setInterval(fetchLogs, 5000);
-</script>
-</body>
-</html>
-"""

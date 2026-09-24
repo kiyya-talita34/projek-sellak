@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from .base import FlowProvider
+
 from ..models import SegmentPrompt
+from .base import FlowProvider
 
 
 class BrowserFlowProvider(FlowProvider):
-    """Kerangka otomasi browser Google Flow.
+    """Kerangka kosong untuk integrasi lain di masa depan.
 
-    Sengaja belum diimplementasikan karena harus diverifikasi terhadap Terms of Service Google Flow.
-    Jangan mengisi class ini dengan bypass CAPTCHA, bypass login, bypass limit, atau scraping yang melanggar aturan layanan.
+    Jangan mengisi class ini dengan bypass CAPTCHA, bypass login, bypass limit,
+    atau scraping yang melanggar aturan layanan. Untuk otomasi browser yang sudah ada,
+    gunakan provider 'browser' (PlaywrightFlowProvider); untuk jalur resmi gunakan 'veo_api'.
     """
 
-    def request_segment(self, job_id: int, niche: str, segment: SegmentPrompt) -> Path:
+    name = "browser_stub"
+    description = "Placeholder (tidak diimplementasikan)"
+
+    def request_segment(self, job_id: int, niche: str, segment: SegmentPrompt) -> Path | None:
         raise NotImplementedError(
-            "Browser automation Google Flow belum diaktifkan. Gunakan provider 'manual' atau implementasikan hanya jika sesuai ToS."
+            "Provider 'browser_stub' hanya placeholder. Gunakan flow.provider = 'manual', 'browser', atau 'veo_api'."
         )

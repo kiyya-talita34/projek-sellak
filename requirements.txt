@@ -9,6 +9,4 @@ uvicorn>=0.30.0
 python-multipart>=0.0.9
 imageio-ffmpeg>=0.5.1
 tzdata>=2024.1
-playwright>=1.44.0
-
-
+# Mode flow.provider="browser" (opsional): pip install -r requirements-browser.txt && playwright install chromium

@@ -1,13 +1,11 @@
-"""Skrip pengujian & kalibrasi otomasi browser Google Flow Ultra.
+"""Skrip login & kalibrasi otomasi browser Google Flow (provider `browser`).
 
-Jalankan perintah:
     python scripts/test_flow_browser.py [--url URL_FLOW] [--headless]
 
-Skrip ini akan membuka Chrome dengan profil persisten di data/browser_profile,
-sehingga Anda dapat login akun Google Anda sekali saja dan memastikan
-elemen prompt terdeteksi dengan tepat.
+Membuka Chrome/Chromium dengan profil persisten (config: flow.browser_user_data_dir) supaya Anda
+login akun Google SEKALI secara manual, lalu memeriksa apakah selector di `flow.selectors`
+(config.json) menemukan kolom prompt & tombol generate. Tidak ada bypass login/CAPTCHA.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -15,103 +13,93 @@ import sys
 import time
 from pathlib import Path
 
-# Pastikan folder project ada di sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from yshorts_bot.config import load_config
+from yshorts_bot.config import load_config  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Test Google Flow Ultra Browser Automation")
-    parser.add_argument("--url", default=None, help="URL Google Flow Ultra (default dari config.json)")
-    parser.add_argument("--headless", action="store_true", help="Jalankan browser tanpa GUI")
+    parser = argparse.ArgumentParser(description="Login & kalibrasi otomasi browser Google Flow")
+    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--url", default=None, help="URL Google Flow (default dari config.json)")
+    parser.add_argument("--headless", action="store_true", help="tanpa jendela (tidak bisa login manual)")
     args = parser.parse_args()
 
-    cfg = load_config("config.json")
+    cfg = load_config(args.config)
     flow_url = args.url or cfg.flow.flow_url
     profile_dir = Path(cfg.flow.browser_user_data_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
+    selectors = cfg.flow.selectors
 
-    print("=" * 60)
-    print("  PENGUJIAN OTOMASI BROWSER GOOGLE FLOW ULTRA")
-    print("=" * 60)
-    print(f"URL Target   : {flow_url}")
-    print(f"User Data Dir: {profile_dir.resolve()}")
-    print(f"Mode GUI     : {'Headless (tanpa GUI)' if args.headless else 'Headed (Jendela Terbuka)'}")
-    print("=" * 60)
+    print("=" * 64)
+    print("  LOGIN & KALIBRASI BROWSER GOOGLE FLOW")
+    print("=" * 64)
+    print(f"URL            : {flow_url}")
+    print(f"Profil browser : {profile_dir.resolve()}")
+    print(f"Channel        : {cfg.flow.browser_channel or 'chromium bawaan'}")
+    print(f"Mode           : {'headless' if args.headless else 'jendela terbuka'}")
+    print("=" * 64)
 
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError:
+        raise SystemExit("Playwright belum terinstall: pip install playwright && playwright install chromium")
 
     with sync_playwright() as p:
-        print("\n[1/4] Meluncurkan Google Chrome...")
-        context = p.chromium.launch_persistent_context(
+        kwargs = dict(
             user_data_dir=str(profile_dir.resolve()),
-            channel="chrome",
             headless=args.headless,
             accept_downloads=True,
-            args=[
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--no-first-run", "--no-default-browser-check"],
             viewport={"width": 1366, "height": 900},
         )
+        print("\n[1/4] Meluncurkan browser...")
+        try:
+            context = p.chromium.launch_persistent_context(channel=cfg.flow.browser_channel, **kwargs) if cfg.flow.browser_channel else p.chromium.launch_persistent_context(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            print(f"      Channel '{cfg.flow.browser_channel}' tidak tersedia ({e}); memakai Chromium bawaan.")
+            context = p.chromium.launch_persistent_context(**kwargs)
 
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            print(f"[2/4] Membuka halaman: {flow_url}")
-            page.goto(flow_url, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)
-
-            title = page.title()
-            print(f"      Judul Halaman: '{title}'")
+            print(f"[2/4] Membuka {flow_url}")
+            page.goto(flow_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(3000)
+            print(f"      Judul halaman: '{page.title()}'")
 
             print("\n[3/4] Memeriksa status login...")
-            sign_in = page.locator("text=/Sign in|Masuk|Log in/i").first
-            try:
-                if sign_in.is_visible(timeout=2000):
-                    print("      [INFO] Tombol login terdeteksi. Silakan login pada jendela browser yang terbuka.")
-                    print("      Menunggu hingga login selesai (tekan Enter di terminal jika sudah selesai)...")
-                    if not args.headless:
-                        input("      Tekan Enter setelah Anda berhasil login di browser >> ")
-                else:
-                    print("      [OK] Sesi browser aktif / sudah dalam kondisi login.")
-            except Exception:
-                print("      [OK] Tidak terdeteksi halaman login.")
+            needs_login = "accounts.google.com" in page.url or page.locator(selectors.sign_in).first.count() > 0
+            if needs_login and not args.headless:
+                print("      Belum login. Silakan login di jendela browser (sesi tersimpan di profil).")
+                input("      Tekan Enter setelah login selesai >> ")
+                page.goto(flow_url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(3000)
+            elif needs_login:
+                print("      [PERHATIAN] Belum login dan mode headless: jalankan tanpa --headless untuk login manual.")
+            else:
+                print("      [OK] Sesi login aktif.")
 
-            print("\n[4/4] Memeriksa elemen prompt input...")
-            input_selectors = [
-                "textarea[placeholder*='prompt' i]",
-                "textarea[placeholder*='describe' i]",
-                "textarea",
-                "div[contenteditable='true']",
-                "[aria-label*='prompt' i]",
-                "input[type='text'][placeholder*='prompt' i]",
-            ]
+            print("\n[4/4] Memeriksa selector...")
+            for label, candidates in (("prompt_input", selectors.prompt_input), ("generate_button", selectors.generate_button), ("download_button", selectors.download_button)):
+                found = None
+                for sel in candidates:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.count() > 0 and loc.is_visible():
+                            found = sel
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
+                status = f"[OK] {found}" if found else "[BELUM] tidak ada yang cocok (tombol download wajar belum ada sebelum generate)"
+                print(f"      {label:<16}: {status}")
 
-            found_input = None
-            for sel in input_selectors:
-                loc = page.locator(sel).first
-                try:
-                    if loc.is_visible(timeout=2000):
-                        found_input = sel
-                        print(f"      [OK] Input prompt ditemukan dengan selector: {sel}")
-                        break
-                except Exception:
-                    continue
-
-            if not found_input:
-                print("      [PERHATIAN] Input prompt belum terdeteksi otomatis dengan selector umum.")
-                screenshot_path = Path("data/logs/test_flow_page.png")
-                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(screenshot_path))
-                print(f"      Screenshot halaman disimpan di: {screenshot_path}")
-
-            print("\n" + "=" * 60)
-            print("  PENGUJIAN SELESAI - Browser akan ditutup dalam 5 detik...")
-            print("=" * 60)
+            shot = Path(cfg.paths.log_dir) / "test_flow_page.png"
+            shot.parent.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(shot))
+            print(f"\nScreenshot halaman: {shot}")
+            print("Bila selector belum cocok, klik kanan elemen di Chrome -> Inspect, lalu isi flow.selectors di config.json.")
+            print("Browser ditutup dalam 5 detik...")
             time.sleep(5)
-
         finally:
             context.close()
 
